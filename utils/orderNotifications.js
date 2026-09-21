@@ -80,6 +80,9 @@ function buildOrderConfirmationParams(order) {
     templateName: order.includeValueInWhatsApp
       ? whatsappConfig.templateNameWithValue
       : whatsappConfig.templateName,
+    // Only the with-value template has an IMAGE header. Sending a header to a
+    // template that lacks one is rejected just like omitting a required one.
+    headerImageUrl: order.includeValueInWhatsApp ? whatsappConfig.headerImageUrl : undefined,
     parameters: values.map((text) => ({ type: "text", text: sanitizeParam(text) })),
   };
 }
@@ -131,7 +134,7 @@ async function sendOrderConfirmation(orderId, options = {}) {
       return { ok: false, status: "skipped_no_consent", message: "Customer has not consented" };
     }
 
-    const { templateName, parameters } = buildOrderConfirmationParams(order);
+    const { templateName, parameters, headerImageUrl } = buildOrderConfirmationParams(order);
     const attempts = (order.whatsappNotification?.attempts || 0) + 1;
 
     console.log(`📤 Sending WhatsApp confirmation for ${order.orderId} (attempt ${attempts})...`);
@@ -140,6 +143,7 @@ async function sendOrderConfirmation(orderId, options = {}) {
       templateName,
       languageCode: whatsappConfig.languageCode,
       bodyParameters: parameters,
+      headerImageUrl,
     });
 
     const base = {

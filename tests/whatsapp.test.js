@@ -253,3 +253,41 @@ test('treats a network failure as a retryable failure rather than throwing', asy
     }
   );
 });
+
+// --- image header (Meta 132012 regression) ----------------------------------
+
+test('with-value orders carry the header image; plain orders do not', () => {
+  const withValue = buildOrderConfirmationParams(baseOrder({ includeValueInWhatsApp: true }));
+  assert.strictEqual(withValue.headerImageUrl, 'https://www.sajanshreegarments.in/logo.png');
+
+  const plain = buildOrderConfirmationParams(baseOrder());
+  assert.strictEqual(plain.headerImageUrl, undefined);
+});
+
+test('sends a header component before the body when a header image is supplied', async () => {
+  let captured = null;
+  await withFakeFetch(
+    async (url, init) => { captured = JSON.parse(init.body); return fakeResponse(200, { wamid: 'w', status: 'sent' }); },
+    async () => {
+      await sendTemplateMessage({
+        to: '919876543210',
+        templateName: 'order_confirmation_with_value',
+        bodyParameters: [{ type: 'text', text: 'Ramesh' }],
+        headerImageUrl: 'https://www.sajanshreegarments.in/logo.png',
+      });
+    }
+  );
+  assert.deepStrictEqual(captured.components, [
+    { type: 'header', parameters: [{ type: 'image', image: { link: 'https://www.sajanshreegarments.in/logo.png' } }] },
+    { type: 'body', parameters: [{ type: 'text', text: 'Ramesh' }] },
+  ]);
+});
+
+test('sends no header component when none is supplied', async () => {
+  let captured = null;
+  await withFakeFetch(
+    async (url, init) => { captured = JSON.parse(init.body); return fakeResponse(200, { wamid: 'w', status: 'sent' }); },
+    async () => { await sendTemplateMessage({ to: '919876543210', bodyParameters: [] }); }
+  );
+  assert.deepStrictEqual(captured.components.map((c) => c.type), ['body']);
+});

@@ -24,6 +24,12 @@ const whatsappConfig = {
   get templateNameWithValue() {
     return process.env.SLIDE_WHATSAPP_TEMPLATE_WITH_VALUE || 'order_confirmation_with_value';
   },
+  // Public URL of the image shown in the header of templates that have an IMAGE
+  // header (order_confirmation_with_value). WhatsApp fetches it itself, so it must
+  // be publicly reachable — a local file path or a private URL fails the send.
+  get headerImageUrl() {
+    return process.env.SLIDE_WHATSAPP_HEADER_IMAGE_URL || 'https://www.sajanshreegarments.in/logo.png';
+  },
   get languageCode() {
     // Must byte-match the locale the template was approved under at Meta —
     // "en" and "en_US" are different templates and a mismatch 404s every send.
@@ -75,7 +81,7 @@ let warnedNotConfigured = false;
  *
  * @returns {Promise<{ok: boolean, status: string, [key: string]: any}>}
  */
-async function sendTemplateMessage({ to, templateName, languageCode, bodyParameters }) {
+async function sendTemplateMessage({ to, templateName, languageCode, bodyParameters, headerImageUrl }) {
   if (!isWhatsAppConfigured()) {
     if (!warnedNotConfigured) {
       console.log('💤 Skipping WhatsApp send: SLIDE_API_KEY not set (logged once per process).');
@@ -100,7 +106,14 @@ async function sendTemplateMessage({ to, templateName, languageCode, bodyParamet
     to: recipient,
     templateName: templateName || whatsappConfig.templateName,
     languageCode: languageCode || whatsappConfig.languageCode,
-    components: [{ type: 'body', parameters: bodyParameters }],
+    // A template with an IMAGE header is rejected by Meta (132012) unless the
+    // send supplies one, so the header component is added only when asked for.
+    components: [
+      ...(headerImageUrl
+        ? [{ type: 'header', parameters: [{ type: 'image', image: { link: headerImageUrl } }] }]
+        : []),
+      { type: 'body', parameters: bodyParameters },
+    ],
   };
 
   let response;

@@ -460,7 +460,7 @@ exports.updateOrderStatus = async (req, res) => {
 };
 
 // Manually (re)send the WhatsApp confirmation for an order.
-// Body (all optional): { force?: boolean, phone?: string, consent?: boolean }
+// Body (all optional): { phone?: string, consent?: boolean }
 exports.resendOrderWhatsApp = async (req, res) => {
   try {
     console.log('\n📲 ===== RESEND WHATSAPP REQUEST =====');
@@ -472,7 +472,7 @@ exports.resendOrderWhatsApp = async (req, res) => {
     const order = await Order.findById(req.params.id);
     if (!order) return res.status(404).json({ message: "Order not found" });
 
-    const { force, phone, consent } = req.body || {};
+    const { phone, consent } = req.body || {};
 
     // Let the admin fix a missing/typo'd number inline, and make the fix stick.
     if (phone) {
@@ -498,12 +498,6 @@ exports.resendOrderWhatsApp = async (req, res) => {
     }
 
     const existing = order.whatsappNotification;
-    if (existing?.status === "sent" && force !== true) {
-      return res.status(409).json({
-        message: "This order has already been sent to WhatsApp",
-        whatsappNotification: existing,
-      });
-    }
 
     const lastAttempt = existing?.lastAttemptAt ? new Date(existing.lastAttemptAt).getTime() : 0;
     const sinceLast = Date.now() - lastAttempt;
