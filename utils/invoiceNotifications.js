@@ -95,6 +95,9 @@ async function sendInvoiceNotification(invoiceId) {
       templateName,
       languageCode: whatsappConfig.languageCode,
       bodyParameters: buildInvoiceParams(invoice),
+      // The approved invoice template has an IMAGE header; Meta rejects the send
+      // (132012) if it isn't supplied.
+      headerImageUrl: whatsappConfig.headerImageUrl,
     });
 
     const base = {
