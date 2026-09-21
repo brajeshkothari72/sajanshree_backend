@@ -152,6 +152,37 @@ function safeName(value) {
   return String(value || "unknown").replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 80);
 }
 
+// One operator "Yes" must always produce one message.
+//
+// TallyPrime fires the hook two or three times per confirmation (payload / empty
+// body / payload, all within about a second), and those are mechanical, not a
+// decision. A second genuine Yes — the operator deliberately asking again, maybe
+// because the first message went to a wrong number — is a new instruction and
+// must send.
+//
+// Everything within the window counts as one confirmation and gets one token;
+// anything later is a new confirmation with a new token. The backend sends
+// whenever the token is one it has not already acted on, so a human Yes is never
+// swallowed while retries of the same job stay safe.
+const CONFIRMATION_WINDOW_MS = 20000;
+const recentConfirmations = new Map();
+
+function confirmationToken(payload) {
+  const key = [payload.voucherGuid, payload.amount, payload.partyPhone].join("|");
+  const now = Date.now();
+
+  for (const [k, seen] of recentConfirmations) {
+    if (now - seen.at > CONFIRMATION_WINDOW_MS) recentConfirmations.delete(k);
+  }
+
+  const seen = recentConfirmations.get(key);
+  if (seen) return { token: seen.token, repeat: true };
+
+  const token = `${payload.voucherGuid || "vch"}:${now}`;
+  recentConfirmations.set(key, { token, at: now });
+  return { token, repeat: false };
+}
+
 async function enqueue(payload) {
   const job = {
     payload,
@@ -257,6 +288,15 @@ const server = http.createServer(async (req, res) => {
       log("WARN", `Rejected payload missing ${missing.join(", ")}: ${rawText.slice(0, 300)}`);
       return json(res, 400, { ok: false, message: `Missing: ${missing.join(", ")}` });
     }
+
+    // Stamp this confirmation. Tally's repeats within the window share a token;
+    // a later Yes gets a new one and therefore always sends.
+    const { token, repeat } = confirmationToken(payload);
+    if (repeat) {
+      log("INFO", `Ignoring Tally's repeat fire for ${payload.voucherNumber}`);
+      return json(res, 200, { ok: true, duplicate: true });
+    }
+    payload.sendToken = token;
 
     const name = await enqueue(payload);
     log("INFO", `Queued ${payload.voucherNumber} for ${payload.partyLedgerName} as ${name}`);
@@ -468,4 +508,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { normalizePayload, flatten };
+module.exports = { normalizePayload, flatten, confirmationToken, CONFIRMATION_WINDOW_MS };

@@ -35,6 +35,11 @@ const tallyInvoiceSchema = new mongoose.Schema(
 
     amount: { type: Number },
 
+    // The companion issues one token per operator confirmation in Tally. We
+    // store the last one we actually sent for, so a repeat of the same token
+    // (a retry) stays quiet while a fresh Yes always sends.
+    lastSendToken: { type: String },
+
     whatsappNotification: { type: whatsappNotificationSchema, default: undefined },
   },
   { timestamps: true }

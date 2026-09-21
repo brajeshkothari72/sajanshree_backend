@@ -77,6 +77,7 @@ const createInvoiceNotification = async (req, res) => {
       partyLedgerName,
       partyPhone,
       phoneCapturedAtBilling,
+      sendToken,
       amount,
     } = req.body || {};
 
@@ -89,19 +90,25 @@ const createInvoiceNotification = async (req, res) => {
       });
     }
 
-    // Idempotency, keyed on Tally's voucher GUID.
+    // Repeat handling, keyed on Tally's voucher GUID.
     //
-    // TallyPrime fires the hook two or three times per save (observed directly:
-    // payload / empty body / payload), and the companion retries on a flaky shop
-    // connection. Without this the customer gets two or three copies of every
-    // invoice, each one billable.
+    // What must be suppressed: TallyPrime fires the hook two or three times per
+    // save (observed directly), and the companion retries on a flaky shop
+    // connection. Left alone, every invoice would arrive two or three times and
+    // each copy is billable.
     //
-    // A repeat is only re-sent when the bill MATERIALLY changed — the amount or
-    // the phone number. Deliberately not the voucher number: this company uses
-    // Auto Renumber, so numbers shift whenever vouchers are inserted or deleted,
-    // and re-saving a renumbered batch would message all those customers again
-    // about purchases they already know about. A changed number still updates
-    // the record, it just doesn't warrant another message.
+    // What must NOT be suppressed: the operator answering "Yes" in Tally. That is
+    // an instruction, and a person who is told the message was queued must not
+    // find that nothing happened. The companion stamps one token per
+    // confirmation, so an unseen token means a human just asked — and we send.
+    //
+    // We also resend when the bill itself materially changed (amount or phone),
+    // which covers a corrected invoice re-saved without anyone re-confirming.
+    //
+    // A changed voucher NUMBER is not a reason to resend: this company uses Auto
+    // Renumber, so numbers shift whenever vouchers are inserted or deleted, and
+    // re-saving a renumbered batch would message all those customers again about
+    // purchases they already know about. The record is updated silently instead.
     const existing = await TallyInvoice.findOne({ voucherGuid: String(voucherGuid).trim() });
     if (existing) {
       const newAmount = Number(amount) || 0;
@@ -111,7 +118,13 @@ const createInvoiceNotification = async (req, res) => {
       });
       const numberChanged = String(voucherNumber).trim() !== existing.voucherNumber;
 
-      if (!material) {
+      // The operator answering "Yes" in Tally is an instruction to send, and must
+      // never be silently swallowed. The companion issues one token per
+      // confirmation, so a token we have not acted on means a human just asked.
+      // A repeat of a token we already sent is a retry and stays suppressed.
+      const newConfirmation = Boolean(sendToken) && sendToken !== existing.lastSendToken;
+
+      if (!material && !newConfirmation) {
         // Keep the record current even when nothing warrants a message.
         if (numberChanged) {
           await TallyInvoice.updateOne(
@@ -130,10 +143,10 @@ const createInvoiceNotification = async (req, res) => {
         });
       }
 
-      console.log(
-        `✏️ ${existing.voucherNumber} changed (${amountChanged ? "amount " : ""}` +
-          `${phoneChanged ? "phone" : ""}) — resending`
-      );
+      const why = newConfirmation
+        ? "operator confirmed again"
+        : `${amountChanged ? "amount changed " : ""}${phoneChanged ? "phone changed" : ""}`.trim();
+      console.log(`✏️ ${existing.voucherNumber} — resending (${why})`);
       await TallyInvoice.updateOne(
         { _id: existing._id },
         {
@@ -142,6 +155,7 @@ const createInvoiceNotification = async (req, res) => {
             amount: newAmount,
             partyPhone,
             voucherDate: parseTallyDate(voucherDate) || existing.voucherDate,
+            lastSendToken: sendToken,
           },
           // Clear the previous outcome so the sweep and the UI show this attempt,
           // not the one for the superseded bill.
@@ -174,6 +188,7 @@ const createInvoiceNotification = async (req, res) => {
         partyPhone,
         phoneCapturedAtBilling: Boolean(phoneCapturedAtBilling),
         amount: Number(amount) || 0,
+        lastSendToken: sendToken,
       });
     } catch (error) {
       // Two identical posts can race past the findOne above. The unique index is

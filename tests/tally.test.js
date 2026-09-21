@@ -206,3 +206,38 @@ test('a renumbered voucher alone is not material', () => {
                            { amount: 4893, partyPhone: '9644400090' });
   assert.strictEqual(r.material, false);
 });
+
+// --- operator confirmations vs mechanical repeats ----------------------------
+//
+// An operator answering "Yes" in Tally must always produce a message. Tally's
+// own double-fire must not. These are told apart by time.
+
+const { confirmationToken } = require('../tally-companion/companion');
+
+test('Tally repeat fires within the window share one token', () => {
+  const payload = { voucherGuid: 'g-1', amount: 500, partyPhone: '919425062368' };
+  const first = confirmationToken(payload);
+  const second = confirmationToken(payload);
+  const third = confirmationToken(payload);
+
+  assert.strictEqual(first.repeat, false, 'the first fire is the real one');
+  assert.strictEqual(second.repeat, true);
+  assert.strictEqual(third.repeat, true);
+  assert.strictEqual(second.token, first.token);
+});
+
+test('a different voucher gets its own token even in the same instant', () => {
+  const a = confirmationToken({ voucherGuid: 'g-a', amount: 1, partyPhone: '91' });
+  const b = confirmationToken({ voucherGuid: 'g-b', amount: 1, partyPhone: '91' });
+  assert.notStrictEqual(a.token, b.token);
+  assert.strictEqual(b.repeat, false);
+});
+
+test('a corrected amount is a new confirmation, not a repeat', () => {
+  // The operator fixed the bill and confirmed again; the customer holds a wrong
+  // total, so this must not be collapsed into the earlier send.
+  const guid = 'g-amount';
+  confirmationToken({ voucherGuid: guid, amount: 100, partyPhone: '91' });
+  const changed = confirmationToken({ voucherGuid: guid, amount: 250, partyPhone: '91' });
+  assert.strictEqual(changed.repeat, false);
+});
