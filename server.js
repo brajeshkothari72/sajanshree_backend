@@ -14,8 +14,13 @@ app.use(express.json()); // Parses incoming JSON requests
 const allowedOrigins = [
   "http://localhost:5173",
   "http://localhost:5174",
-  "https://sajan-shree-frontend-bu8g.vercel.app",
+  "https://admin.sajanshreegarments.in",
 ];
+
+// Any subdomain of our own domain. The dashboard has already moved hosts twice,
+// and each move broke every API call with a CORS error that reads like an auth
+// or network fault — this stops the next move needing a backend redeploy.
+const ALLOWED_ORIGIN_PATTERN = /^https:\/\/([a-z0-9-]+\.)*sajanshreegarments\.in$/i;
 
 const corsOptions = {
   origin: function (origin, callback) {
@@ -23,11 +28,14 @@ const corsOptions = {
     if (!origin) return callback(null, true);
     // Allow all localhost ports
     if (/^http:\/\/localhost:\d+$/.test(origin)) return callback(null, true);
-    if (allowedOrigins.indexOf(origin) !== -1) {
+    if (allowedOrigins.indexOf(origin) !== -1 || ALLOWED_ORIGIN_PATTERN.test(origin)) {
       return callback(null, true);
-    } else {
-      return callback(new Error("Not allowed by CORS"));
     }
+    // Deny by returning false rather than an Error: an Error here becomes a 500
+    // from the error handler, which looks like the API is broken instead of
+    // saying the origin was refused.
+    console.warn(`🚫 CORS: refused origin ${origin}`);
+    return callback(null, false);
   },
   credentials: true,
 };
