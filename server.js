@@ -84,16 +84,32 @@ app.use("/api/tally", tallyRoutes);
 
 const mongoose = require("mongoose");
 
+// Keep retrying rather than exiting.
+//
+// process.exit(1) here used to turn any database problem into a crash loop: the
+// server binds its port, the host marks it healthy, then ~50s later the process
+// dies and gets restarted, forever. On Render that shows as a deploy stuck "in
+// progress" rather than a failure, which is a great deal harder to diagnose than
+// a service that stays up and says loudly what is wrong.
+//
+// A wrong MONGO_URI now surfaces as failing requests plus this log, which is the
+// tradeoff: noisier in production, but recoverable without a redeploy once the
+// database comes back or a credential is corrected.
+const CONNECT_RETRY_MS = 10000;
+
 const connectDB = async () => {
+  if (!process.env.MONGO_URI) {
+    console.error("❌ MONGO_URI is not set — the API will run but every query will fail.");
+    return;
+  }
   try {
-    await mongoose.connect(process.env.MONGO_URI, {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
-    });
+    await mongoose.connect(process.env.MONGO_URI);
     console.log("✅ MongoDB Connected Successfully");
   } catch (error) {
-    console.error("❌ MongoDB Connection Error:", error.message);
-    process.exit(1);
+    console.error(
+      `❌ MongoDB Connection Error: ${error.message} — retrying in ${CONNECT_RETRY_MS / 1000}s`
+    );
+    setTimeout(connectDB, CONNECT_RETRY_MS).unref();
   }
 };
 
