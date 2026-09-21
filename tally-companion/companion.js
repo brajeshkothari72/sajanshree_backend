@@ -30,7 +30,12 @@ const CONFIG_PATH = process.env.TALLY_COMPANION_CONFIG || path.join(__dirname, "
 function loadConfig() {
   let fileConfig = {};
   try {
-    fileConfig = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
+    // Strip a leading BOM. This file gets hand-edited on a Windows till, and
+    // PowerShell's Set-Content -Encoding utf8, Notepad and several editors all
+    // write one; JSON.parse rejects it with an error that names an invisible
+    // character, which is a miserable thing to debug on site.
+    const text = fs.readFileSync(CONFIG_PATH, "utf8").replace(/^﻿/, "");
+    fileConfig = JSON.parse(text);
   } catch (error) {
     if (error.code !== "ENOENT") {
       console.error(`Could not parse ${CONFIG_PATH}: ${error.message}`);
