@@ -164,3 +164,45 @@ test('test redirect diverts every send away from the real recipient', async () =
     delete require.cache[require.resolve('../config/whatsapp')];
   }
 });
+
+// --- repeat-voucher handling -------------------------------------------------
+//
+// TallyPrime fires the save hook two or three times per voucher (observed
+// directly), so this decides whether a customer gets one message or three.
+
+const { describeChange } = require('../controllers/tallyController');
+
+test('an identical repeat is not material — Tally double-fire must not resend', () => {
+  const r = describeChange({ amount: 5355, partyPhone: '9876543210' },
+                           { amount: 5355, partyPhone: '9876543210' });
+  assert.strictEqual(r.material, false);
+});
+
+test('a changed amount is material — the bill the customer holds is wrong', () => {
+  const r = describeChange({ amount: 100, partyPhone: '9876543210' },
+                           { amount: 250, partyPhone: '9876543210' });
+  assert.strictEqual(r.amountChanged, true);
+  assert.strictEqual(r.material, true);
+});
+
+test('a corrected phone number is material — the first message went nowhere useful', () => {
+  const r = describeChange({ amount: 100, partyPhone: '905790886' },
+                           { amount: 100, partyPhone: '9057908866' });
+  assert.strictEqual(r.phoneChanged, true);
+  assert.strictEqual(r.material, true);
+});
+
+test('float noise does not count as a change', () => {
+  // Amounts arrive as strings from Tally and round-trip through Number; an
+  // exact !== would resend on representation noise alone.
+  const r = describeChange({ amount: 5355.0 }, { amount: '5355.00' });
+  assert.strictEqual(r.material, false);
+});
+
+test('a renumbered voucher alone is not material', () => {
+  // Auto Renumber shifts numbers when vouchers are inserted or deleted. The
+  // number is not part of this decision at all, by design.
+  const r = describeChange({ amount: 4893, partyPhone: '9644400090' },
+                           { amount: 4893, partyPhone: '9644400090' });
+  assert.strictEqual(r.material, false);
+});

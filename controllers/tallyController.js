@@ -34,6 +34,25 @@ function parseTallyDate(value) {
 }
 
 /**
+ * Does a repeat of the same voucher warrant messaging the customer again?
+ *
+ * "Material" means the bill the customer holds is now wrong: a different amount,
+ * or a different number to reach them on. A changed voucher number is NOT
+ * material — Auto Renumber shifts numbers whenever vouchers are inserted or
+ * deleted, and re-saving a renumbered batch would message all those customers
+ * again about purchases they already know about.
+ *
+ * Amounts are compared with a tolerance: they arrive as strings from Tally and
+ * round-trip through Number, so an exact !== would resend on float noise alone.
+ */
+function describeChange(existing, incoming) {
+  const amountChanged = Math.abs((existing.amount || 0) - (Number(incoming.amount) || 0)) > 0.005;
+  const phoneChanged =
+    String(incoming.partyPhone || "").trim() !== String(existing.partyPhone || "").trim();
+  return { amountChanged, phoneChanged, material: amountChanged || phoneChanged };
+}
+
+/**
  * POST /api/tally/invoice-whatsapp
  *
  * Called by the local companion service on the shop PC after a sales voucher is
@@ -70,17 +89,77 @@ const createInvoiceNotification = async (req, res) => {
       });
     }
 
-    // Idempotency. The companion retries on a flaky shop connection, and Tally
-    // itself can fire the hook twice if the operator re-accepts a voucher. Without
-    // this the customer gets the same bill messaged to them repeatedly.
+    // Idempotency, keyed on Tally's voucher GUID.
+    //
+    // TallyPrime fires the hook two or three times per save (observed directly:
+    // payload / empty body / payload), and the companion retries on a flaky shop
+    // connection. Without this the customer gets two or three copies of every
+    // invoice, each one billable.
+    //
+    // A repeat is only re-sent when the bill MATERIALLY changed — the amount or
+    // the phone number. Deliberately not the voucher number: this company uses
+    // Auto Renumber, so numbers shift whenever vouchers are inserted or deleted,
+    // and re-saving a renumbered batch would message all those customers again
+    // about purchases they already know about. A changed number still updates
+    // the record, it just doesn't warrant another message.
     const existing = await TallyInvoice.findOne({ voucherGuid: String(voucherGuid).trim() });
     if (existing) {
-      return res.status(200).json({
-        message: "Already received",
-        duplicate: true,
-        invoiceId: existing._id,
-        whatsapp: existing.whatsappNotification?.status || null,
+      const newAmount = Number(amount) || 0;
+      const { amountChanged, phoneChanged, material } = describeChange(existing, {
+        amount: newAmount,
+        partyPhone,
       });
+      const numberChanged = String(voucherNumber).trim() !== existing.voucherNumber;
+
+      if (!material) {
+        // Keep the record current even when nothing warrants a message.
+        if (numberChanged) {
+          await TallyInvoice.updateOne(
+            { _id: existing._id },
+            { $set: { voucherNumber: String(voucherNumber).trim() } }
+          );
+          console.log(
+            `↻ ${existing.voucherNumber} renumbered to ${String(voucherNumber).trim()} — record updated, no resend`
+          );
+        }
+        return res.status(200).json({
+          message: "Already received",
+          duplicate: true,
+          invoiceId: existing._id,
+          whatsapp: existing.whatsappNotification?.status || null,
+        });
+      }
+
+      console.log(
+        `✏️ ${existing.voucherNumber} changed (${amountChanged ? "amount " : ""}` +
+          `${phoneChanged ? "phone" : ""}) — resending`
+      );
+      await TallyInvoice.updateOne(
+        { _id: existing._id },
+        {
+          $set: {
+            voucherNumber: String(voucherNumber).trim(),
+            amount: newAmount,
+            partyPhone,
+            voucherDate: parseTallyDate(voucherDate) || existing.voucherDate,
+          },
+          // Clear the previous outcome so the sweep and the UI show this attempt,
+          // not the one for the superseded bill.
+          $unset: { whatsappNotification: "" },
+        }
+      );
+
+      res.status(202).json({
+        message: "Invoice updated, resending",
+        invoiceId: existing._id,
+        voucherNumber: String(voucherNumber).trim(),
+        resent: true,
+      });
+
+      sendInvoiceNotification(existing._id).catch((error) =>
+        console.error("⚠️ Background invoice notification failed:", error.message)
+      );
+      return;
     }
 
     let invoice;
@@ -152,4 +231,4 @@ const resendInvoiceWhatsApp = async (req, res) => {
   }
 };
 
-module.exports = { createInvoiceNotification, resendInvoiceWhatsApp, parseTallyDate };
+module.exports = { createInvoiceNotification, resendInvoiceWhatsApp, parseTallyDate, describeChange };
