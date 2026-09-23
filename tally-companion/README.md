@@ -76,14 +76,23 @@ retries the other's job, which is why a Slide outage can't cause duplicates.
 
 ```powershell
 # is it alive, and how much is waiting?
-curl http://127.0.0.1:5111/health
+# NOT `curl` - in PowerShell that is an alias for Invoke-WebRequest, which stops
+# to ask about parsing the response. Invoke-RestMethod just returns the JSON.
+Invoke-RestMethod http://127.0.0.1:5111/health
 
 # what has it been doing?
 Get-Content .\companion.log -Tail 50
 
 # what failed permanently?
 Get-ChildItem .\dead-letter\
+
+# start it by hand (it also starts at logon via the Startup folder)
+Start-Process node -ArgumentList companion.js -WorkingDirectory $PWD -WindowStyle Hidden
 ```
+
+**No response from the health check means the companion is down**, TDL is posting
+into a closed port, and Tally shows the operator nothing at all. This is the first
+thing to check when invoices stop arriving.
 
 A file in `dead-letter/` contains the original payload and the attempt count.
 Fix the cause, then move it back into `queue/` to retry it.
