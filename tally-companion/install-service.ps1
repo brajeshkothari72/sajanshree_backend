@@ -36,6 +36,10 @@ if ($Uninstall) {
     } else {
         Write-Host "No such scheduled task: $TaskName"
     }
+    # The Startup-folder fallback is a separate mechanism; remove it too or the
+    # companion keeps starting after an apparently successful uninstall.
+    $vbs = Join-Path ([Environment]::GetFolderPath('Startup')) 'SajanShreeTallyCompanion.vbs'
+    if (Test-Path $vbs) { Remove-Item $vbs -Force; Write-Host "Removed startup launcher: $vbs" }
     return
 }
 
@@ -95,12 +99,41 @@ $settings = New-ScheduledTaskSettingsSet `
     -RestartInterval (New-TimeSpan -Minutes 1) `
     -ExecutionTimeLimit ([TimeSpan]::Zero)
 
-Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
-    -Principal $principal -Settings $settings -Description `
-    "Forwards TallyPrime sales invoices to the Sajan Shree backend for WhatsApp notification." | Out-Null
+# Register-ScheduledTask needs elevation. A till is usually a standard account,
+# so fall back to the Startup folder rather than failing: it needs no admin
+# rights, starts at logon just the same, and is one file to delete to undo.
+# Without a fallback the operator is left with an uninstalled companion and an
+# "Access is denied" message, and invoices stop the next time the PC reboots.
+$registered = $false
+try {
+    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
+        -Principal $principal -Settings $settings -Description `
+        "Forwards TallyPrime sales invoices to the Sajan Shree backend for WhatsApp notification." `
+        -ErrorAction Stop | Out-Null
+    $registered = $true
+    Start-ScheduledTask -TaskName $TaskName
+    Write-Host "Registered as a scheduled task."
+} catch {
+    Write-Host "Could not register a scheduled task ($($_.Exception.Message.Trim()))."
+    Write-Host "Falling back to the Startup folder, which needs no admin rights."
 
-Start-ScheduledTask -TaskName $TaskName
-Start-Sleep -Seconds 3
+    $startup = [Environment]::GetFolderPath('Startup')
+    $vbs = Join-Path $startup 'SajanShreeTallyCompanion.vbs'
+    # Window style 0: no console window at all. A stray black window on a till
+    # is an invitation for someone to close it.
+    $launcher = @"
+' Starts the Sajan Shree Tally WhatsApp companion at logon, with no visible window.
+' Delete this file to stop it starting.
+Set sh = CreateObject("WScript.Shell")
+sh.CurrentDirectory = "$scriptDir"
+sh.Run """$node"" companion.js", 0, False
+"@
+    [System.IO.File]::WriteAllText($vbs, $launcher, (New-Object System.Text.ASCIIEncoding))
+    Write-Host "Created $vbs"
+    & wscript.exe $vbs
+}
+
+Start-Sleep -Seconds 4
 
 # --- verify it actually came up ----------------------------------------------
 
@@ -110,6 +143,7 @@ try {
     Write-Host ""
     Write-Host "Installed and running. Health: queued=$($health.queued) forwarding to $($health.apiBaseUrl)"
 } catch {
-    Write-Warning "Task registered, but nothing is answering on 127.0.0.1:$port."
+    $how = if ($registered) { "Task registered" } else { "Startup launcher created" }
+    Write-Warning "$how, but nothing is answering on 127.0.0.1:$port."
     Write-Warning "Check $scriptDir\companion.log, or run 'node companion.js' by hand to see the error."
 }
