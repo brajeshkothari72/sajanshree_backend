@@ -340,10 +340,18 @@ function xmlEscape(s) {
 //
 // Invoices sat stuck for hours because of this: enrichment silently got nothing
 // back and the companion, correctly, refused to send a bill reading "Rs. 0.00".
+// Both families and both ports. 9001 is TallyPrime's own port once tally.ini is
+// changed; 9000 is the shared one it falls back to. Trying both means moving the
+// port needs no coordinated change here, and a half-applied migration still works.
 const TALLY_CANDIDATES = () => {
   const configured = config.tallyGatewayUrl;
-  const port = (/:(\d+)/.exec(configured) || [, "9000"])[1];
-  return [...new Set([configured, `http://[::1]:${port}`, `http://127.0.0.1:${port}`])];
+  const configuredPort = (/:(\d+)/.exec(configured) || [, "9000"])[1];
+  const ports = [...new Set([configuredPort, "9001", "9000"])];
+  const urls = [configured];
+  for (const port of ports) {
+    urls.push(`http://[::1]:${port}`, `http://127.0.0.1:${port}`);
+  }
+  return [...new Set(urls)];
 };
 
 let knownGoodTallyUrl = null;
