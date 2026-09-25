@@ -330,54 +330,150 @@ function xmlEscape(s) {
   return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-async function enrichFromTally(payload) {
-  const guid = String(payload.voucherGuid || "").trim();
-  if (!guid) return null;
+// Which address actually reaches TallyPrime is NOT fixed.
+//
+// This till also runs Tally 7.2, and both bind port 9000. Whichever starts first
+// takes IPv4 (0.0.0.0) and the other gets IPv6 (::) — so http://127.0.0.1:9000
+// may reach either one, and it changes with boot order. Tally 7.2 answers our
+// request with "<LINEERROR>No report name!</LINEERROR>", which is not a network
+// failure, so it has to be detected by reading the reply rather than by status.
+//
+// Invoices sat stuck for hours because of this: enrichment silently got nothing
+// back and the companion, correctly, refused to send a bill reading "Rs. 0.00".
+const TALLY_CANDIDATES = () => {
+  const configured = config.tallyGatewayUrl;
+  const port = (/:(\d+)/.exec(configured) || [, "9000"])[1];
+  return [...new Set([configured, `http://[::1]:${port}`, `http://127.0.0.1:${port}`])];
+};
 
-  const body = `<ENVELOPE>
-<HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>VchByGuid</ID></HEADER>
+let knownGoodTallyUrl = null;
+
+function looksLikeTallyPrime(xml) {
+  if (!xml || !xml.includes("<ENVELOPE>")) return false;
+  // Tally 7.2 replies <RESPONSE> with LINEERROR, never a proper ENVELOPE.
+  return !/LINEERROR|TALLYREQUEST&gt; not found/i.test(xml);
+}
+
+async function tallyRequest(body, label) {
+  const urls = knownGoodTallyUrl
+    ? [knownGoodTallyUrl, ...TALLY_CANDIDATES().filter((u) => u !== knownGoodTallyUrl)]
+    : TALLY_CANDIDATES();
+
+  for (const url of urls) {
+    let xml;
+    try {
+      const r = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "text/xml" },
+        body,
+        signal: AbortSignal.timeout(config.tallyTimeoutMs),
+      });
+      xml = await r.text();
+    } catch {
+      continue; // nothing listening here; try the next address
+    }
+    if (looksLikeTallyPrime(xml)) {
+      if (knownGoodTallyUrl !== url) {
+        log("INFO", `TallyPrime gateway is at ${url}`);
+        knownGoodTallyUrl = url;
+      }
+      return xml;
+    }
+    log("WARN", `${url} answered ${label} but is not TallyPrime (likely Tally 7.2 on the same port)`);
+  }
+  knownGoodTallyUrl = null;
+  return null;
+}
+
+// A brand-new voucher arrives from TDL with $Guid still unset — it comes through
+// as ...-00000000, identical for every bill. Those must never be trusted: they
+// would collide in the backend and four different customers would be treated as
+// one invoice.
+function hasUsableGuid(guid) {
+  return Boolean(guid) && !/-0+$/.test(String(guid).trim());
+}
+
+function buildVoucherQuery(payload, filterExpr) {
+  return `<ENVELOPE>
+<HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>VchLookup</ID></HEADER>
 <BODY><DESC><STATICVARIABLES>
-<SVEXPORTFORMAT>$SysName:XML</SVEXPORTFORMAT>
+<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
 <SVCURRENTCOMPANY>${xmlEscape(payload.companyName || "")}</SVCURRENTCOMPANY>
+<SVFROMDATE TYPE="Date">20200401</SVFROMDATE>
+<SVTODATE TYPE="Date">20990331</SVTODATE>
 </STATICVARIABLES>
 <TDL><TDLMESSAGE>
-<COLLECTION NAME="VchByGuid" ISINITIALIZE="Yes">
-<TYPE>Voucher</TYPE><NATIVEMETHOD>LedgerEntries</NATIVEMETHOD><FILTER>ThisGuid</FILTER>
+<COLLECTION NAME="VchLookup" ISINITIALIZE="Yes">
+<TYPE>Voucher</TYPE>
+<NATIVEMETHOD>Guid</NATIVEMETHOD>
+<NATIVEMETHOD>VoucherNumber</NATIVEMETHOD>
+<NATIVEMETHOD>Date</NATIVEMETHOD>
+<NATIVEMETHOD>LedgerEntries</NATIVEMETHOD>
+<FILTER>VchFilter</FILTER>
 </COLLECTION>
-<SYSTEM TYPE="Formulae" NAME="ThisGuid">$Guid = "${xmlEscape(guid)}"</SYSTEM>
+<SYSTEM TYPE="Formulae" NAME="VchFilter">${filterExpr}</SYSTEM>
 </TDLMESSAGE></TDL>
 </DESC></BODY></ENVELOPE>`;
+}
 
-  let xml;
-  try {
-    const r = await fetch(config.tallyGatewayUrl, {
-      method: "POST",
-      headers: { "Content-Type": "text/xml" },
-      body,
-      signal: AbortSignal.timeout(config.tallyTimeoutMs),
-    });
-    xml = await r.text();
-  } catch (error) {
-    log("WARN", `Tally gateway unreachable for ${payload.voucherNumber}: ${error.message}`);
+/**
+ * Fill in what TDL cannot supply: the invoice total, and — for a newly created
+ * voucher — the real GUID. Returns null if Tally can't tell us, in which case the
+ * job is retried rather than sent with a wrong total.
+ */
+async function enrichFromTally(payload) {
+  const guid = String(payload.voucherGuid || "").trim();
+  const byGuid = hasUsableGuid(guid);
+
+  // Fall back to the voucher number when the GUID is the all-zeros placeholder.
+  // The lookup then yields the real GUID too, which is what keeps four bills
+  // raised in the same session from colliding into one record.
+  const filter = byGuid
+    ? `$Guid = "${xmlEscape(guid)}"`
+    : `$VoucherNumber = "${xmlEscape(String(payload.voucherNumber || ""))}"`;
+
+  const xml = await tallyRequest(buildVoucherQuery(payload, filter), payload.voucherNumber);
+  if (!xml) {
+    log("WARN", `No TallyPrime gateway reachable for ${payload.voucherNumber}`);
     return null;
   }
 
-  // The party's own row is the single entry flagged IsPartyLedger, and Tally
-  // stores it negative on a sale.
+  const vouchers = xml.split("<VOUCHER ").slice(1);
+  if (vouchers.length === 0) {
+    log("WARN", `Tally has no voucher matching ${byGuid ? "guid" : "number"} for ${payload.voucherNumber}`);
+    return null;
+  }
+  if (!byGuid && vouchers.length > 1) {
+    // Auto Renumber can reuse a number across years. Guessing which one the
+    // operator just raised risks messaging a customer someone else's total.
+    log("WARN", `${payload.voucherNumber} matches ${vouchers.length} vouchers — refusing to guess`);
+    return null;
+  }
+
+  const block = vouchers[0];
   let amount = null;
-  for (const block of xml.split("<LEDGERENTRIES.LIST>").slice(1)) {
-    if (!/<ISPARTYLEDGER[^>]*>\s*Yes/i.test(block)) continue;
-    const m = /<AMOUNT[^>]*>([^<]*)/.exec(block);
+  for (const entry of block.split("<LEDGERENTRIES.LIST>").slice(1)) {
+    if (!/<ISPARTYLEDGER[^>]*>\s*Yes/i.test(entry)) continue;
+    const m = /<AMOUNT[^>]*>([^<]*)/.exec(entry);
+    // Tally stores the party entry negative on a sale.
     if (m) amount = Math.abs(Number(String(m[1]).trim()));
     break;
   }
-  const dateMatch = /<DATE[^>]*>\s*(\d{8})/.exec(xml);
-
   if (!Number.isFinite(amount) || amount === null) {
     log("WARN", `Tally returned no party amount for ${payload.voucherNumber}`);
     return null;
   }
-  return { amount, voucherDate: dateMatch ? dateMatch[1] : payload.voucherDate };
+
+  const out = { amount };
+  const dateMatch = /<DATE[^>]*>\s*(\d{8})/.exec(block);
+  if (dateMatch) out.voucherDate = dateMatch[1];
+
+  const realGuid = (/<GUID[^>]*>([^<]*)/.exec(block) || [])[1];
+  if (!byGuid && realGuid && hasUsableGuid(realGuid)) {
+    out.voucherGuid = realGuid.trim();
+    log("INFO", `Resolved real GUID for ${payload.voucherNumber}: ${out.voucherGuid}`);
+  }
+  return out;
 }
 
 // -------------------------------------------------------------------- worker
@@ -425,11 +521,27 @@ async function drain() {
         if (extra) {
           job.payload = { ...job.payload, ...extra };
           log("INFO", `Enriched ${job.payload.voucherNumber} from Tally: amount=${extra.amount}`);
+        } else if (job.attempts >= config.maxAttempts) {
+          // This path used to retry forever — jobs were seen at 96 attempts
+          // against a cap of 12, because it never checked. A bill Tally cannot
+          // price is never going to become sendable on its own, and silently
+          // looping hides it from whoever needs to act.
+          await fsp.rename(filePath, path.join(config.deadLetterDir, name)).catch(() => {});
+          log(
+            "ERROR",
+            `Dead-lettered ${job.payload.voucherNumber}: Tally gave no amount after ` +
+              `${job.attempts} attempts. Is TallyPrime open with the company loaded?`
+          );
+          continue;
         } else {
           const delay = Math.min(10 * 60_000, 5000 * 2 ** (job.attempts - 1));
           job.nextAttemptAt = Date.now() + delay;
           await fsp.writeFile(filePath, JSON.stringify(job, null, 2), "utf8").catch(() => {});
-          log("WARN", `No amount for ${job.payload.voucherNumber}; retrying in ${Math.round(delay / 1000)}s`);
+          log(
+            "WARN",
+            `No amount for ${job.payload.voucherNumber}; retrying in ${Math.round(delay / 1000)}s ` +
+              `(attempt ${job.attempts}/${config.maxAttempts})`
+          );
           continue;
         }
       }
