@@ -97,6 +97,26 @@ thing to check when invoices stop arriving.
 A file in `dead-letter/` contains the original payload and the attempt count.
 Fix the cause, then move it back into `queue/` to retry it.
 
+## The Tally gateway port
+
+This till also runs **Tally 7.2**, and both it and TallyPrime default to port
+9000. Only one of them gets IPv4; the loser is left on IPv6, and which is which
+depends on boot order. Asking `127.0.0.1:9000` then reaches Tally 7.2, which
+replies `<LINEERROR>No report name!</LINEERROR>` — not a network error, so it can
+only be caught by reading the response body. Invoices sat unsent for hours
+because of this, with no pattern anyone could see.
+
+TallyPrime is therefore on **9001** (`ServerPort=9001` in `tally.ini`), where it
+holds both IPv4 and IPv6 and nothing competes. Tally 7.2 keeps 9000.
+
+**Editing `tally.ini` while Tally is running does nothing.** TallyPrime writes
+its settings back over that file when it exits, silently reverting the change.
+Close Tally first, then edit, then start it — or set the port inside Tally so
+Tally itself owns the value.
+
+The companion probes 9001 and 9000 on both IP families regardless, and checks
+the reply really is TallyPrime, so it survives this being changed again.
+
 ## Gotchas found the hard way
 
 - **TallyPrime fires more than one request per `HTTP Request` action** — observed
