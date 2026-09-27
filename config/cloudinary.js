@@ -14,10 +14,22 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-// Verify Cloudinary connection
-cloudinary.api.ping()
-  .then(() => console.log('✅ Cloudinary connected successfully!'))
-  .catch((err) => console.error('❌ Cloudinary connection failed:', err.message));
+// Verify Cloudinary connection — but only when there is something to verify.
+// ping() THROWS synchronously on a missing cloud_name rather than rejecting, so
+// requiring this module without credentials took the whole process down. That
+// made the module unusable from tests and would kill the server on a deploy
+// where the Cloudinary vars had not been set yet.
+if (process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY) {
+  try {
+    cloudinary.api.ping()
+      .then(() => console.log('✅ Cloudinary connected successfully!'))
+      .catch((err) => console.error('❌ Cloudinary connection failed:', err.message));
+  } catch (err) {
+    console.error('❌ Cloudinary configuration invalid:', err.message || err);
+  }
+} else {
+  console.log('💤 Cloudinary not configured — invoice PDFs will not be attached.');
+}
 
 // Storage for order images
 const orderImageStorage = new CloudinaryStorage({
@@ -54,8 +66,39 @@ const productDetailStorage = new CloudinaryStorage({
 const uploadOrderImage = multer({ storage: orderImageStorage });
 const uploadProductDetailImage = multer({ storage: productDetailStorage });
 
+/**
+ * Upload an invoice PDF and return its public URL.
+ *
+ * WhatsApp fetches the document itself, so the URL has to be reachable without
+ * credentials. resource_type 'raw' keeps the PDF a PDF — 'image' would let
+ * Cloudinary rasterise it, and the customer would receive a picture of page one
+ * instead of a document they can save.
+ *
+ * public_id is the voucher GUID, which is unique per bill and stable, so a
+ * resend overwrites rather than accumulating copies of the same invoice.
+ */
+async function uploadInvoicePdf(buffer, publicId) {
+  return new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      {
+        folder: 'sajan-shree/invoices',
+        public_id: String(publicId).replace(/[^A-Za-z0-9._-]/g, '_'),
+        resource_type: 'raw',
+        format: 'pdf',
+        overwrite: true,
+      },
+      (error, result) => {
+        if (error) return reject(error);
+        resolve(result.secure_url);
+      }
+    );
+    stream.end(buffer);
+  });
+}
+
 module.exports = {
   cloudinary,
   uploadOrderImage,
   uploadProductDetailImage,
+  uploadInvoicePdf,
 };

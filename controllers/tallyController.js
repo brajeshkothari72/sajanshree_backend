@@ -78,6 +78,11 @@ const createInvoiceNotification = async (req, res) => {
       partyPhone,
       phoneCapturedAtBilling,
       sendToken,
+      items,
+      taxes,
+      partyGstin,
+      partyState,
+      partyAddress,
       amount,
     } = req.body || {};
 
@@ -156,6 +161,15 @@ const createInvoiceNotification = async (req, res) => {
             partyPhone,
             voucherDate: parseTallyDate(voucherDate) || existing.voucherDate,
             lastSendToken: sendToken,
+            // Only overwrite the bill detail when this payload actually carries
+            // it. An unconditional set would wipe the stored line items on any
+            // resend that arrived without them, and the PDF would silently drop
+            // back to the no-attachment template.
+            ...(Array.isArray(items) && items.length ? { items } : {}),
+            ...(Array.isArray(taxes) && taxes.length ? { taxes } : {}),
+            ...(partyGstin ? { partyGstin } : {}),
+            ...(partyState ? { partyState } : {}),
+            ...(Array.isArray(partyAddress) && partyAddress.length ? { partyAddress } : {}),
           },
           // Clear the previous outcome so the sweep and the UI show this attempt,
           // not the one for the superseded bill.
@@ -189,6 +203,11 @@ const createInvoiceNotification = async (req, res) => {
         phoneCapturedAtBilling: Boolean(phoneCapturedAtBilling),
         amount: Number(amount) || 0,
         lastSendToken: sendToken,
+        items: Array.isArray(items) ? items : [],
+        taxes: Array.isArray(taxes) ? taxes : [],
+        partyGstin,
+        partyState,
+        partyAddress: Array.isArray(partyAddress) ? partyAddress : [],
       });
     } catch (error) {
       // Two identical posts can race past the findOne above. The unique index is

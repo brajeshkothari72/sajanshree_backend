@@ -81,7 +81,15 @@ let warnedNotConfigured = false;
  *
  * @returns {Promise<{ok: boolean, status: string, [key: string]: any}>}
  */
-async function sendTemplateMessage({ to, templateName, languageCode, bodyParameters, headerImageUrl }) {
+async function sendTemplateMessage({
+  to,
+  templateName,
+  languageCode,
+  bodyParameters,
+  headerImageUrl,
+  headerDocumentUrl,
+  headerDocumentFilename,
+}) {
   if (!isWhatsAppConfigured()) {
     if (!warnedNotConfigured) {
       console.log('💤 Skipping WhatsApp send: SLIDE_API_KEY not set (logged once per process).');
@@ -106,12 +114,30 @@ async function sendTemplateMessage({ to, templateName, languageCode, bodyParamet
     to: recipient,
     templateName: templateName || whatsappConfig.templateName,
     languageCode: languageCode || whatsappConfig.languageCode,
-    // A template with an IMAGE header is rejected by Meta (132012) unless the
-    // send supplies one, so the header component is added only when asked for.
+    // A template with a header is rejected by Meta (132012) unless the send
+    // supplies one, so the header component is added only when asked for.
+    //
+    // A template has exactly ONE header, so document and image are mutually
+    // exclusive: the document wins, because a template declaring DOCUMENT will
+    // reject an image parameter outright.
+    //
+    // The filename is what the customer sees when they save the attachment.
+    // Without it WhatsApp shows the raw Cloudinary public_id, which is a GUID.
     components: [
-      ...(headerImageUrl
-        ? [{ type: 'header', parameters: [{ type: 'image', image: { link: headerImageUrl } }] }]
-        : []),
+      ...(headerDocumentUrl
+        ? [{
+            type: 'header',
+            parameters: [{
+              type: 'document',
+              document: {
+                link: headerDocumentUrl,
+                filename: headerDocumentFilename || 'Invoice.pdf',
+              },
+            }],
+          }]
+        : headerImageUrl
+          ? [{ type: 'header', parameters: [{ type: 'image', image: { link: headerImageUrl } }] }]
+          : []),
       { type: 'body', parameters: bodyParameters },
     ],
   };

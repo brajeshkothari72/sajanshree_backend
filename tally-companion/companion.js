@@ -416,6 +416,10 @@ function buildVoucherQuery(payload, filterExpr) {
 <NATIVEMETHOD>Guid</NATIVEMETHOD>
 <NATIVEMETHOD>VoucherNumber</NATIVEMETHOD>
 <NATIVEMETHOD>Date</NATIVEMETHOD>
+<NATIVEMETHOD>PartyGSTIN</NATIVEMETHOD>
+<NATIVEMETHOD>StateName</NATIVEMETHOD>
+<NATIVEMETHOD>Address</NATIVEMETHOD>
+<NATIVEMETHOD>AllInventoryEntries</NATIVEMETHOD>
 <NATIVEMETHOD>LedgerEntries</NATIVEMETHOD>
 <FILTER>VchFilter</FILTER>
 </COLLECTION>
@@ -475,6 +479,55 @@ async function enrichFromTally(payload) {
   const out = { amount };
   const dateMatch = /<DATE[^>]*>\s*(\d{8})/.exec(block);
   if (dateMatch) out.voucherDate = dateMatch[1];
+
+  // Everything the server needs to reproduce the bill as a PDF. Collected here
+  // because Tally is only reachable from this machine — the backend cannot ask
+  // for it later, and a cron retry hours from now still has to be able to build
+  // the attachment.
+  const tag = (s, name) => {
+    const m = new RegExp("<" + name + "[^>]*>([^<]*)").exec(s);
+    return m ? m[1].trim() : "";
+  };
+
+  const items = [];
+  for (const entry of block.split("<ALLINVENTORYENTRIES.LIST>").slice(1)) {
+    const name = tag(entry, "STOCKITEMNAME");
+    if (!name) continue;
+    items.push({
+      name,
+      hsn: tag(entry, "GSTHSNNAME"),
+      quantity: tag(entry, "BILLEDQTY"),
+      rate: tag(entry, "RATE"),
+      amount: Math.abs(Number(tag(entry, "AMOUNT")) || 0),
+    });
+  }
+  if (items.length) out.items = items;
+
+  // The non-party ledger entries: "IGST 5%" on an inter-state sale, CGST + SGST
+  // within the state, and often a rounding line such as "Round Up Sales".
+  //
+  // The SIGN IS KEPT. Rounding entries are genuinely negative (-0.02 on a real
+  // bill), and taking the absolute value made them add instead of subtract — the
+  // invoice would have totalled 39,543.04 against Tally's 39,543.00 and tripped
+  // the reconciliation warning on every rounded bill.
+  //
+  // Named as Tally names them, so the customer's copy shows the same breakup as
+  // the books rather than a tidied-up version of it.
+  const taxes = [];
+  for (const entry of block.split("<LEDGERENTRIES.LIST>").slice(1)) {
+    if (/<ISPARTYLEDGER[^>]*>\s*Yes/i.test(entry)) continue;
+    const name = tag(entry, "LEDGERNAME");
+    const value = Number(tag(entry, "AMOUNT"));
+    if (name && Number.isFinite(value) && value !== 0) taxes.push({ name, amount: value });
+  }
+  if (taxes.length) out.taxes = taxes;
+
+  const gstin = tag(block, "PARTYGSTIN");
+  if (gstin) out.partyGstin = gstin;
+  const state = tag(block, "STATENAME");
+  if (state) out.partyState = state;
+  const address = [...block.matchAll(/<ADDRESS>([^<]*)/g)].map((m) => m[1].trim()).filter(Boolean);
+  if (address.length) out.partyAddress = address.slice(0, 4);
 
   const realGuid = (/<GUID[^>]*>([^<]*)/.exec(block) || [])[1];
   if (!byGuid && realGuid && hasUsableGuid(realGuid)) {

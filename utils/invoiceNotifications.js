@@ -7,6 +7,8 @@
 const TallyInvoice = require("../models/tallyInvoiceModel");
 const { normalizeToWhatsAppNumber } = require("./phone");
 const { sanitizeParam, MAX_ATTEMPTS } = require("./orderNotifications");
+const { renderInvoicePdf } = require("./invoicePdf");
+const { uploadInvoicePdf } = require("../config/cloudinary");
 const {
   isWhatsAppConfigured,
   sendTemplateMessage,
@@ -18,6 +20,14 @@ const {
 // version where hiding the value makes sense, so there is only one template here.
 function invoiceTemplateName() {
   return process.env.SLIDE_WHATSAPP_INVOICE_TEMPLATE || "invoice_notification";
+}
+
+// The PDF template and the image template are separate approvals with different
+// header types, so which one we use has to follow whether a PDF was produced.
+// Falling back to the image template means a PDF failure still delivers the
+// message — the customer gets their invoice details, just without the document.
+function invoiceDocumentTemplateName() {
+  return process.env.SLIDE_WHATSAPP_INVOICE_DOC_TEMPLATE || "invoice_with_document";
 }
 
 function formatAmount(value) {
@@ -84,8 +94,44 @@ async function sendInvoiceNotification(invoiceId) {
       return { ok: false, status: "skipped_invalid_phone", reason: normalized.reason };
     }
 
-    const templateName = invoiceTemplateName();
     const attempts = (invoice.whatsappNotification?.attempts || 0) + 1;
+
+    // Attach the tax invoice when we have the line items to build one.
+    //
+    // Deliberately best-effort: if the PDF cannot be produced or uploaded, the
+    // message still goes with the image template. A customer who gets their
+    // invoice details without the attachment is far better served than one who
+    // gets nothing because Cloudinary was briefly unreachable.
+    let pdfUrl = null;
+    if (Array.isArray(invoice.items) && invoice.items.length > 0) {
+      try {
+        const buffer = await renderInvoicePdf(invoice);
+        const url = await uploadInvoicePdf(buffer, invoice.voucherGuid || invoice._id);
+
+        // Uploading is not the same as being fetchable. Cloudinary blocks PDF
+        // delivery by default ("Restricted media types"), so a perfectly good
+        // upload can still answer 401 to anyone trying to read it — including
+        // WhatsApp, which fetches the document itself. Sending a header pointing
+        // at an unreadable URL fails the whole message, so confirm first and
+        // fall back to the no-attachment template if it isn't public.
+        const probe = await fetch(url, { signal: AbortSignal.timeout(15000) });
+        const head = Buffer.from(await probe.arrayBuffer()).subarray(0, 5).toString();
+        if (probe.ok && head === "%PDF-") {
+          pdfUrl = url;
+          console.log(`📄 Invoice PDF ready for ${invoice.voucherNumber} (${(buffer.length / 1024).toFixed(0)} KB)`);
+        } else {
+          console.error(
+            `⚠️ PDF uploaded but is not publicly readable (HTTP ${probe.status}) for ` +
+              `${invoice.voucherNumber} — sending without the attachment. ` +
+              `Check Cloudinary → Settings → Security → Restricted media types.`
+          );
+        }
+      } catch (error) {
+        console.error(`⚠️ Could not attach PDF for ${invoice.voucherNumber}: ${error.message}`);
+      }
+    }
+
+    const templateName = pdfUrl ? invoiceDocumentTemplateName() : invoiceTemplateName();
 
     console.log(
       `📤 Sending WhatsApp invoice notification for ${invoice.voucherNumber} (attempt ${attempts})...`
@@ -95,9 +141,15 @@ async function sendInvoiceNotification(invoiceId) {
       templateName,
       languageCode: whatsappConfig.languageCode,
       bodyParameters: buildInvoiceParams(invoice),
-      // The approved invoice template has an IMAGE header; Meta rejects the send
-      // (132012) if it isn't supplied.
-      headerImageUrl: whatsappConfig.headerImageUrl,
+      // Meta rejects a send (132012) whose header parameter doesn't match the
+      // template's declared header type, so these follow the template chosen above.
+      ...(pdfUrl
+        ? {
+            headerDocumentUrl: pdfUrl,
+            // What the customer sees when saving the file.
+            headerDocumentFilename: `Invoice ${String(invoice.voucherNumber || "").replace(/[\\/:*?"<>|]/g, "-")}.pdf`,
+          }
+        : { headerImageUrl: whatsappConfig.headerImageUrl }),
     });
 
     const base = {
@@ -156,5 +208,6 @@ async function persist(invoice, notification) {
 module.exports = {
   buildInvoiceParams,
   invoiceTemplateName,
+  invoiceDocumentTemplateName,
   sendInvoiceNotification,
 };

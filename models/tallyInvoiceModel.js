@@ -35,6 +35,27 @@ const tallyInvoiceSchema = new mongoose.Schema(
 
     amount: { type: Number },
 
+    // Enough of the bill to reproduce it as a PDF. Stored rather than re-fetched
+    // at send time because Tally is only reachable from the shop PC, and a cron
+    // retry running hours later must still be able to build the attachment.
+    items: [
+      {
+        _id: false,
+        name: { type: String },
+        hsn: { type: String },
+        quantity: { type: String },   // "40 Piecs" — Tally's own unit wording
+        rate: { type: String },       // "150.00/Piecs"
+        amount: { type: Number },
+      },
+    ],
+    // Named as Tally names them ("IGST 5%", or CGST + SGST for in-state sales),
+    // so the PDF shows the same breakup as the books.
+    taxes: [{ _id: false, name: { type: String }, amount: { type: Number } }],
+
+    partyGstin: { type: String, trim: true },
+    partyState: { type: String, trim: true },
+    partyAddress: [{ type: String }],
+
     // The companion issues one token per operator confirmation in Tally. We
     // store the last one we actually sent for, so a repeat of the same token
     // (a retry) stays quiet while a fresh Yes always sends.
