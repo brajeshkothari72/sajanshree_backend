@@ -56,6 +56,21 @@ const tallyInvoiceSchema = new mongoose.Schema(
     partyState: { type: String, trim: true },
     partyAddress: [{ type: String }],
 
+    // Dispatch Details as entered in Tally. Optional throughout: the fields
+    // exist in every company but are frequently left blank, and the invoice
+    // simply omits the block when nothing was entered.
+    dispatch: {
+      _id: false,
+      deliveryNote: String,
+      docNo: String,
+      through: String,
+      destination: String,
+      vehicleNo: String,
+      date: String,
+      ewayBillNo: String,
+      ewayBillDate: String,
+    },
+
     // The companion issues one token per operator confirmation in Tally. We
     // store the last one we actually sent for, so a repeat of the same token
     // (a retry) stays quiet while a fresh Yes always sends.

@@ -419,6 +419,14 @@ function buildVoucherQuery(payload, filterExpr) {
 <NATIVEMETHOD>PartyGSTIN</NATIVEMETHOD>
 <NATIVEMETHOD>StateName</NATIVEMETHOD>
 <NATIVEMETHOD>Address</NATIVEMETHOD>
+<NATIVEMETHOD>BasicDeliveryNote</NATIVEMETHOD>
+<NATIVEMETHOD>BasicShipDocumentNo</NATIVEMETHOD>
+<NATIVEMETHOD>BasicShippedBy</NATIVEMETHOD>
+<NATIVEMETHOD>BasicDestination</NATIVEMETHOD>
+<NATIVEMETHOD>BasicShipVesselNo</NATIVEMETHOD>
+<NATIVEMETHOD>BasicShippingDate</NATIVEMETHOD>
+<NATIVEMETHOD>EWayBillNo</NATIVEMETHOD>
+<NATIVEMETHOD>EWayBillDate</NATIVEMETHOD>
 <NATIVEMETHOD>AllInventoryEntries</NATIVEMETHOD>
 <NATIVEMETHOD>LedgerEntries</NATIVEMETHOD>
 <FILTER>VchFilter</FILTER>
@@ -521,6 +529,29 @@ async function enrichFromTally(payload) {
     if (name && Number.isFinite(value) && value !== 0) taxes.push({ name, amount: value });
   }
   if (taxes.length) out.taxes = taxes;
+
+  // Dispatch and e-way details. Every one of these field names was verified
+  // valid against this company's Tally on 11-Oct-2026, but all were empty — the
+  // Dispatch Details screen is not being filled in. They are collected anyway so
+  // they appear the day someone starts entering them, with no code change.
+  //
+  // Tally omits empty fields entirely rather than returning blanks, so absence
+  // here means "not entered", not "not supported".
+  const dispatch = {};
+  for (const [key, tagName] of [
+    ["deliveryNote", "BASICDELIVERYNOTE"],
+    ["docNo", "BASICSHIPDOCUMENTNO"],
+    ["through", "BASICSHIPPEDBY"],
+    ["destination", "BASICDESTINATION"],
+    ["vehicleNo", "BASICSHIPVESSELNO"],
+    ["date", "BASICSHIPPINGDATE"],
+    ["ewayBillNo", "EWAYBILLNO"],
+    ["ewayBillDate", "EWAYBILLDATE"],
+  ]) {
+    const value = tag(block, tagName);
+    if (value) dispatch[key] = value;
+  }
+  if (Object.keys(dispatch).length) out.dispatch = dispatch;
 
   const gstin = tag(block, "PARTYGSTIN");
   if (gstin) out.partyGstin = gstin;

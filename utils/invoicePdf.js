@@ -146,6 +146,41 @@ function renderInvoicePdf(invoice) {
 
     y = Math.max(leftBottom, my) + 14;
 
+    // --- dispatch details ---------------------------------------------------
+    // Only drawn when Tally actually holds something. The Dispatch Details
+    // screen is often left blank, and an empty box of colons looks like a fault
+    // rather than an absence.
+    const d = invoice.dispatch || {};
+    const dispatchRows = [
+      ["Delivery Note", d.deliveryNote],
+      ["Dispatch Doc No.", d.docNo],
+      ["Dispatched through", d.through],
+      ["Destination", d.destination],
+      ["Motor Vehicle No.", d.vehicleNo],
+      ["Dispatch Date", d.date ? formatDate(d.date) : ""],
+      ["E-Way Bill No.", d.ewayBillNo],
+      ["E-Way Bill Date", d.ewayBillDate ? formatDate(d.ewayBillDate) : ""],
+    ].filter(([, v]) => String(v || "").trim());
+
+    if (dispatchRows.length) {
+      const rowsPerCol = Math.ceil(dispatchRows.length / 2);
+      const boxH = 16 + rowsPerCol * 12 + 6;
+      doc.rect(left, y, width, boxH).fillAndStroke(brand.band, brand.rule);
+      doc.font("Helvetica-Bold").fontSize(8.5).fillColor(brand.navy)
+        .text("DISPATCH DETAILS", left + 8, y + 5);
+
+      dispatchRows.forEach(([label, value], i) => {
+        const col = Math.floor(i / rowsPerCol);
+        const rowY = y + 18 + (i % rowsPerCol) * 12;
+        const cx = left + 8 + col * (width / 2);
+        doc.font("Helvetica").fontSize(8.5).fillColor(brand.muted)
+          .text(label, cx, rowY, { width: 96, lineBreak: false });
+        doc.font("Helvetica-Bold").fontSize(8.5).fillColor(brand.ink)
+          .text(String(value), cx + 100, rowY, { width: width / 2 - 112, lineBreak: false });
+      });
+      y += boxH + 10;
+    }
+
     // --- items table --------------------------------------------------------
     // HSN is required on a GST tax invoice. Tally carries it per inventory line
     // as GSTHSNNAME, so it is shown per line rather than assumed uniform — a
