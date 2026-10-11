@@ -201,6 +201,58 @@ function slipDir() {
   return config.slipDir || path.join(__dirname, "dispatch-slips");
 }
 
+// The last few sales bills, for the upload page's dropdown.
+async function recentVouchers(limit = 25) {
+  const today = new Date();
+  const from = new Date(today.getTime() - 30 * 86400000);
+  const ymd = (d) =>
+    `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
+
+  const body = `<ENVELOPE>
+<HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>RecentVch</ID></HEADER>
+<BODY><DESC><STATICVARIABLES>
+<SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+<SVFROMDATE TYPE="Date">${ymd(from)}</SVFROMDATE>
+<SVTODATE TYPE="Date">${ymd(today)}</SVTODATE>
+</STATICVARIABLES>
+<TDL><TDLMESSAGE>
+<COLLECTION NAME="RecentVch" ISINITIALIZE="Yes">
+<TYPE>Voucher</TYPE>
+<NATIVEMETHOD>VoucherNumber</NATIVEMETHOD>
+<NATIVEMETHOD>VoucherTypeName</NATIVEMETHOD>
+<NATIVEMETHOD>Date</NATIVEMETHOD>
+<NATIVEMETHOD>PartyLedgerName</NATIVEMETHOD>
+<NATIVEMETHOD>LedgerEntries</NATIVEMETHOD>
+</COLLECTION>
+</TDLMESSAGE></TDL>
+</DESC></BODY></ENVELOPE>`;
+
+  const xml = await tallyRequest(body, "recent vouchers");
+  if (!xml) return [];
+
+  const rows = [];
+  for (const block of xml.split("<VOUCHER ").slice(1)) {
+    if (!/<VOUCHERTYPENAME>Sales</i.test(block)) continue;
+    const get = (name) => {
+      const m = new RegExp("<" + name + "[^>]*>([^<]*)").exec(block);
+      return m ? m[1].trim() : "";
+    };
+    let amount = "";
+    for (const entry of block.split("<LEDGERENTRIES.LIST>").slice(1)) {
+      if (!/<ISPARTYLEDGER[^>]*>\s*Yes/i.test(entry)) continue;
+      const m = /<AMOUNT[^>]*>([^<]*)/.exec(entry);
+      if (m) {
+        amount = Math.abs(Number(m[1])).toLocaleString("en-IN", { maximumFractionDigits: 0 });
+      }
+      break;
+    }
+    const date = get("DATE");
+    rows.push({ voucherNumber: get("VOUCHERNUMBER"), party: get("PARTYLEDGERNAME"), amount, date });
+  }
+  rows.sort((a, b) => String(b.date).localeCompare(String(a.date)));
+  return rows.slice(0, limit);
+}
+
 async function findSlip(voucherNumber) {
   const digits = String(voucherNumber || "").replace(/\D/g, "");
   if (!digits) return null;
@@ -293,6 +345,74 @@ const server = http.createServer(async (req, res) => {
       queued: queued.filter((f) => f.endsWith(".json")).length,
       apiBaseUrl: config.apiBaseUrl,
     });
+  }
+
+  // --- dispatch slip upload page ------------------------------------------
+  //
+  // Served from the companion rather than built as a separate app: it already
+  // runs an HTTP server on this machine, so there is nothing extra to install,
+  // start or keep alive. Bound to 127.0.0.1 like everything else, so it is
+  // reachable from this till and nowhere else — which is why it needs no login.
+  if (req.method === "GET" && (req.url === "/" || req.url.startsWith("/slip"))) {
+    try {
+      const html = await fsp.readFile(path.join(__dirname, "slip-page.html"));
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Content-Length": html.length });
+      return res.end(html);
+    } catch {
+      return json(res, 500, { ok: false, message: "slip-page.html is missing" });
+    }
+  }
+
+  // Recent sales bills, so the counter picks from a list instead of retyping a
+  // voucher number — mistyping it means the slip silently never attaches.
+  if (req.method === "GET" && req.url.startsWith("/recent-vouchers")) {
+    return json(res, 200, await recentVouchers());
+  }
+
+  if (req.method === "GET" && req.url.startsWith("/pending-slips")) {
+    const out = [];
+    try {
+      for (const name of await fsp.readdir(slipDir())) {
+        if (!SLIP_EXTENSIONS.includes(path.extname(name).toLowerCase())) continue;
+        const st = await fsp.stat(path.join(slipDir(), name));
+        out.push({
+          name,
+          sizeKb: Math.round(st.size / 1024),
+          added: new Date(st.mtimeMs).toLocaleTimeString("en-IN"),
+        });
+      }
+    } catch { /* folder not there yet */ }
+    return json(res, 200, out);
+  }
+
+  if (req.method === "POST" && req.url.startsWith("/slip")) {
+    try {
+      const body = JSON.parse(await readBody(req, 12_000_000));
+      const digits = String(body.voucherNumber || "").replace(/\D/g, "");
+      if (!digits) return json(res, 400, { ok: false, message: "Enter a voucher number." });
+      if (!body.base64) return json(res, 400, { ok: false, message: "No photo received." });
+
+      const bytes = Buffer.from(body.base64, "base64");
+      if (bytes.length > MAX_SLIP_BYTES) {
+        return json(res, 400, { ok: false, message: "That photo is over 8 MB." });
+      }
+      // Name it after the bill's sequence number, not every digit in the
+      // voucher: "2026-27/451" should save as 451.jpg, matching what is printed
+      // on the bill and what the folder convention documents. Stripping all
+      // digits gave "202627451", which still matched but read as nonsense to
+      // anyone looking in the folder.
+      const seq = (/(\d+)(?!.*\d)/.exec(String(body.voucherNumber)) || [, digits])[1];
+      const ext = (path.extname(body.fileName || "") || ".jpg").toLowerCase();
+      const savedAs = `${seq}${SLIP_EXTENSIONS.includes(ext) ? ext : ".jpg"}`;
+
+      await fsp.mkdir(slipDir(), { recursive: true });
+      await fsp.writeFile(path.join(slipDir(), savedAs), bytes);
+      log("INFO", `Dispatch slip uploaded for voucher ${body.voucherNumber} as ${savedAs}`);
+      return json(res, 200, { ok: true, savedAs });
+    } catch (error) {
+      log("WARN", `Slip upload failed: ${error.message}`);
+      return json(res, 500, { ok: false, message: error.message });
+    }
   }
 
   if (req.method !== "POST" || !req.url.startsWith("/enqueue")) {

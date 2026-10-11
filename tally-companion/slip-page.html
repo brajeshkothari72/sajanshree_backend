@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dispatch Slip — Sajan Shree Garments</title>
+<style>
+  :root { --navy:#1B2F5E; --red:#A81E24; --ink:#1F2937; --muted:#6B7280; --rule:#D9DEE7; --band:#F1F5F9; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:16px/1.5 "Segoe UI",system-ui,sans-serif; color:var(--ink); background:#fff; }
+  header { background:var(--navy); color:#fff; padding:14px 20px; }
+  header h1 { margin:0; font-size:18px; font-weight:600; }
+  header p { margin:2px 0 0; font-size:13px; opacity:.8; }
+  main { max-width:760px; margin:0 auto; padding:20px; }
+  label { display:block; font-size:13px; font-weight:600; color:var(--muted); margin:18px 0 6px; }
+  input[type=text], select { width:100%; padding:11px 12px; font-size:17px; border:1px solid var(--rule); border-radius:6px; }
+  /* Big drop zone: this is used at a counter, often in a hurry. */
+  #drop { margin-top:6px; border:2px dashed var(--rule); border-radius:10px; padding:26px; text-align:center; cursor:pointer; background:var(--band); }
+  #drop.over { border-color:var(--navy); background:#E8EEF8; }
+  #drop p { margin:4px 0; }
+  #drop .hint { font-size:13px; color:var(--muted); }
+  #preview { margin-top:12px; display:none; }
+  #preview img { max-width:100%; max-height:300px; border:1px solid var(--rule); border-radius:6px; }
+  button { margin-top:18px; width:100%; padding:14px; font-size:17px; font-weight:600; color:#fff; background:var(--navy); border:0; border-radius:6px; cursor:pointer; }
+  button:disabled { background:#9AA6BC; cursor:not-allowed; }
+  #msg { margin-top:14px; padding:12px 14px; border-radius:6px; display:none; font-size:15px; }
+  .ok { background:#E7F6EC; color:#13693A; }
+  .err { background:#FDECEC; color:var(--red); }
+  table { width:100%; border-collapse:collapse; margin-top:10px; font-size:14px; }
+  th, td { text-align:left; padding:7px 8px; border-bottom:1px solid var(--rule); }
+  th { color:var(--muted); font-size:12px; text-transform:uppercase; }
+  .none { color:var(--muted); font-size:14px; padding:8px 0; }
+  h2 { font-size:15px; margin:30px 0 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Dispatch Slip Upload</h1>
+  <p>Attach a photo to an invoice, then press Alt+J in Tally and answer Yes.</p>
+</header>
+
+<main>
+  <label for="vch">Invoice / voucher number</label>
+  <select id="vch"><option value="">Loading recent bills…</option></select>
+
+  <label for="manual">…or type it</label>
+  <input type="text" id="manual" placeholder="e.g. 441 or 2026-27/441" autocomplete="off">
+
+  <label>Dispatch slip photo</label>
+  <div id="drop">
+    <p><strong>Click to choose a photo</strong></p>
+    <p class="hint">or drag one here — JPG or PNG, up to 8 MB</p>
+  </div>
+  <input type="file" id="file" accept="image/jpeg,image/png" hidden>
+  <div id="preview"><img id="img" alt="selected slip"></div>
+
+  <button id="go" disabled>Upload slip</button>
+  <div id="msg"></div>
+
+  <h2>Slips waiting to be sent</h2>
+  <div id="pending"><p class="none">none</p></div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let picked = null;
+
+function show(text, ok) {
+  const m = $("msg");
+  m.textContent = text;
+  m.className = ok ? "ok" : "err";
+  m.style.display = "block";
+}
+
+function chosenVoucher() {
+  return ($("manual").value.trim() || $("vch").value || "").trim();
+}
+
+function refreshButton() {
+  $("go").disabled = !(picked && chosenVoucher());
+}
+
+$("drop").onclick = () => $("file").click();
+$("drop").ondragover = (e) => { e.preventDefault(); $("drop").classList.add("over"); };
+$("drop").ondragleave = () => $("drop").classList.remove("over");
+$("drop").ondrop = (e) => {
+  e.preventDefault();
+  $("drop").classList.remove("over");
+  if (e.dataTransfer.files[0]) take(e.dataTransfer.files[0]);
+};
+$("file").onchange = (e) => { if (e.target.files[0]) take(e.target.files[0]); };
+$("vch").onchange = refreshButton;
+$("manual").oninput = refreshButton;
+
+function take(file) {
+  if (!/^image\/(jpeg|png)$/.test(file.type)) return show("That is not a JPG or PNG.", false);
+  if (file.size > 8 * 1024 * 1024) return show("That photo is over 8 MB. Use a smaller one.", false);
+  picked = file;
+  const r = new FileReader();
+  r.onload = () => { $("img").src = r.result; $("preview").style.display = "block"; };
+  r.readAsDataURL(file);
+  $("drop").querySelector("strong").textContent = file.name;
+  $("msg").style.display = "none";
+  refreshButton();
+}
+
+$("go").onclick = async () => {
+  const voucherNumber = chosenVoucher();
+  if (!picked || !voucherNumber) return;
+  $("go").disabled = true;
+  $("go").textContent = "Uploading…";
+  try {
+    const base64 = await new Promise((res, rej) => {
+      const r = new FileReader();
+      r.onload = () => res(String(r.result).split(",")[1]);
+      r.onerror = rej;
+      r.readAsDataURL(picked);
+    });
+    const resp = await fetch("/slip", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ voucherNumber, fileName: picked.name, base64 }),
+    });
+    const body = await resp.json();
+    if (resp.ok) {
+      show("Saved as " + body.savedAs + ". Now press Alt+J on that voucher in Tally and answer Yes.", true);
+      picked = null;
+      $("preview").style.display = "none";
+      $("drop").querySelector("strong").textContent = "Click to choose a photo";
+      loadPending();
+    } else {
+      show(body.message || "Upload failed.", false);
+    }
+  } catch (e) {
+    show("Upload failed: " + e.message, false);
+  }
+  $("go").textContent = "Upload slip";
+  refreshButton();
+};
+
+async function loadVouchers() {
+  try {
+    const r = await fetch("/recent-vouchers");
+    const list = await r.json();
+    const sel = $("vch");
+    sel.innerHTML = '<option value="">— choose a recent bill —</option>';
+    for (const v of list) {
+      const o = document.createElement("option");
+      o.value = v.voucherNumber;
+      o.textContent = v.voucherNumber + "  ·  " + v.party + (v.amount ? "  ·  Rs. " + v.amount : "");
+      sel.appendChild(o);
+    }
+    if (!list.length) sel.innerHTML = '<option value="">(could not reach Tally — type the number below)</option>';
+  } catch {
+    $("vch").innerHTML = '<option value="">(could not reach Tally — type the number below)</option>';
+  }
+}
+
+async function loadPending() {
+  try {
+    const r = await fetch("/pending-slips");
+    const list = await r.json();
+    const box = $("pending");
+    if (!list.length) { box.innerHTML = '<p class="none">none</p>'; return; }
+    box.innerHTML = "<table><tr><th>File</th><th>Size</th><th>Added</th></tr>" +
+      list.map((s) => `<tr><td>${s.name}</td><td>${s.sizeKb} KB</td><td>${s.added}</td></tr>`).join("") +
+      "</table>";
+  } catch { /* leave as-is */ }
+}
+
+loadVouchers();
+loadPending();
+setInterval(loadPending, 10000);
+</script>
+</body>
+</html>
