@@ -55,6 +55,10 @@ function loadConfig() {
     pollIntervalMs: Number(fileConfig.pollIntervalMs || 15000),
     requestTimeoutMs: Number(fileConfig.requestTimeoutMs || 20000),
     maxAttempts: Number(fileConfig.maxAttempts || 12),
+    // How long a queued bill waits for Tally to come back before it is
+    // dead-lettered. Counted in elapsed time, not attempts: Tally being shut
+    // overnight is normal, and 12 tries is barely an hour.
+    tallyPatienceMs: Number(fileConfig.tallyPatienceMs || 24 * 3600_000),
     tallyGatewayUrl: fileConfig.tallyGatewayUrl || "http://127.0.0.1:9000",
     tallyTimeoutMs: Number(fileConfig.tallyTimeoutMs || 20000),
   };
@@ -171,7 +175,11 @@ const CONFIRMATION_WINDOW_MS = 20000;
 const recentConfirmations = new Map();
 
 function confirmationToken(payload) {
-  const key = [payload.voucherGuid, payload.amount, payload.partyPhone].join("|");
+  // The voucher number is in the key because a send started from the phone
+  // has no GUID yet - every one of them carries the same all-zeros
+  // placeholder, so without this two different bills sent seconds apart
+  // would share a token and the backend would send only the first.
+  const key = [payload.voucherGuid, payload.voucherNumber, payload.amount, payload.partyPhone].join("|");
   const now = Date.now();
 
   for (const [k, seen] of recentConfirmations) {
@@ -181,7 +189,7 @@ function confirmationToken(payload) {
   const seen = recentConfirmations.get(key);
   if (seen) return { token: seen.token, repeat: true };
 
-  const token = `${payload.voucherGuid || "vch"}:${now}`;
+  const token = `${payload.voucherGuid || "vch"}:${payload.voucherNumber || ""}:${now}`;
   recentConfirmations.set(key, { token, at: now });
   return { token, repeat: false };
 }
@@ -227,7 +235,7 @@ function slipToken() {
 }
 
 const SLIP_TOKEN = slipToken();
-const SLIP_PATHS = new Set(["/", "/slip", "/recent-vouchers", "/pending-slips"]);
+const SLIP_PATHS = new Set(["/", "/slip", "/slip-image", "/recent-vouchers", "/send"]);
 
 // ::ffff:127.0.0.1 is how a v4 loopback arrives on a dual-stack socket.
 const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
@@ -298,6 +306,49 @@ async function recentVouchers(limit = 25) {
   return rows.slice(0, limit);
 }
 
+// Longest match wins: "441" must not be claimed by a file named "4410".
+function matchingSlips(digits, names) {
+  return names
+    .filter((n) => SLIP_EXTENSIONS.includes(path.extname(n).toLowerCase()))
+    .filter((n) => {
+      const stem = path.basename(n, path.extname(n)).replace(/[^0-9]/g, "");
+      return stem && (digits.endsWith(stem) || stem.endsWith(digits));
+    })
+    .sort((a, b) => b.length - a.length);
+}
+
+// Which slip, if any, belongs to a voucher - for the bill list on the phone.
+//
+// A sent slip was renamed "<timestamp>-441.jpg" when it was filed, and those
+// leading digits would defeat the matcher, so the prefix is stripped first.
+// Sent ones are still worth showing: "already sent" is the answer to "did I
+// already do this bill?", which is the question actually being asked.
+async function slipFor(voucherNumber) {
+  const digits = String(voucherNumber || "").replace(/[^0-9]/g, "");
+  if (!digits) return null;
+
+  const pending = await fsp.readdir(slipDir()).catch(() => []);
+  const hit = matchingSlips(digits, pending)[0];
+  if (hit) return { state: "waiting", name: hit };
+
+  const sentDir = path.join(slipDir(), "sent");
+  const sent = await fsp.readdir(sentDir).catch(() => []);
+  const bare = new Map(sent.map((n) => [n.replace(/^[0-9]+-/, ""), n]));
+  const match = matchingSlips(digits, [...bare.keys()])[0];
+  if (match) return { state: "sent", name: bare.get(match) };
+
+  return null;
+}
+
+// Resolve a voucher to a slip file on disk, wherever it was filed.
+async function slipPath(voucherNumber) {
+  const found = await slipFor(voucherNumber);
+  if (!found) return null;
+  return found.state === "sent"
+    ? path.join(slipDir(), "sent", found.name)
+    : path.join(slipDir(), found.name);
+}
+
 async function findSlip(voucherNumber) {
   const digits = String(voucherNumber || "").replace(/\D/g, "");
   if (!digits) return null;
@@ -309,14 +360,7 @@ async function findSlip(voucherNumber) {
     return null; // folder not created yet — nothing to do
   }
 
-  // Longest match wins: "441" must not be claimed by a file named "4410".
-  const candidates = names
-    .filter((n) => SLIP_EXTENSIONS.includes(path.extname(n).toLowerCase()))
-    .filter((n) => {
-      const stem = path.basename(n, path.extname(n)).replace(/\D/g, "");
-      return stem && (digits.endsWith(stem) || stem.endsWith(digits));
-    })
-    .sort((a, b) => b.length - a.length);
+  const candidates = matchingSlips(digits, names);
 
   for (const name of candidates) {
     const full = path.join(slipDir(), name);
@@ -420,23 +464,75 @@ const server = http.createServer(async (req, res) => {
   // Recent sales bills, so the counter picks from a list instead of retyping a
   // voucher number — mistyping it means the slip silently never attaches.
   if (req.method === "GET" && pathname === "/recent-vouchers") {
-    return json(res, 200, await recentVouchers());
+    const bills = await recentVouchers();
+    for (const bill of bills) bill.slip = await slipFor(bill.voucherNumber);
+    return json(res, 200, bills);
   }
 
-  if (req.method === "GET" && pathname === "/pending-slips") {
-    const out = [];
+  // The slip already on a bill, so he can look at it instead of guessing.
+  if (req.method === "GET" && pathname === "/slip-image") {
+    const full = await slipPath(searchParams.get("v"));
+    const bytes = full ? await fsp.readFile(full).catch(() => null) : null;
+    if (!bytes) return json(res, 404, { ok: false, message: "No slip on that bill." });
+    res.writeHead(200, {
+      "Content-Type": full.toLowerCase().endsWith(".png") ? "image/png" : "image/jpeg",
+      "Content-Length": bytes.length,
+      "Cache-Control": "no-store",
+    });
+    return res.end(bytes);
+  }
+
+  // Send an invoice from the phone, instead of walking back to Tally to
+  // press Alt+J.
+  //
+  // Only a voucher number crosses the wire. Everything that decides what the
+  // customer receives - the total, the items, the number it goes to - is read
+  // from Tally here, so a caller on the wifi cannot dictate any of it.
+  //
+  // Nothing is checked against Tally now, on purpose. The job is queued with
+  // no amount, which is the existing signal to enrich it before forwarding;
+  // if Tally is shut the queue simply waits and sends when it reopens.
+  if (req.method === "POST" && pathname === "/send") {
     try {
-      for (const name of await fsp.readdir(slipDir())) {
-        if (!SLIP_EXTENSIONS.includes(path.extname(name).toLowerCase())) continue;
-        const st = await fsp.stat(path.join(slipDir(), name));
-        out.push({
-          name,
-          sizeKb: Math.round(st.size / 1024),
-          added: new Date(st.mtimeMs).toLocaleTimeString("en-IN"),
-        });
+      const body = JSON.parse(await readBody(req, 100_000));
+      const voucherNumber = String(body.voucherNumber || "").trim();
+      const partyLedgerName = String(body.partyLedgerName || "").trim();
+      if (!voucherNumber || !partyLedgerName) {
+        return json(res, 400, { ok: false, message: "Need the bill number and the party." });
       }
-    } catch { /* folder not there yet */ }
-    return json(res, 200, out);
+
+      const payload = {
+        voucherNumber,
+        partyLedgerName,
+        voucherType: "Sales",
+        // The all-zeros placeholder TDL sends for an unsaved voucher, which
+        // enrichment already knows to replace with the real GUID.
+        voucherGuid: "00000000-0000-0000-0000-000000000000",
+        companyName: body.companyName || "",
+      };
+
+      const { token, repeat } = confirmationToken(payload);
+      if (repeat) {
+        log("INFO", `Ignoring a second Send tap for ${voucherNumber}`);
+        return json(res, 200, { ok: true, duplicate: true });
+      }
+      payload.sendToken = token;
+
+      const slip = await findSlip(voucherNumber);
+      if (slip) {
+        payload.slipImageBase64 = slip.base64;
+        payload.slipFileName = slip.name;
+      }
+
+      const name = await enqueue(payload);
+      log("INFO", `Send requested from ${req.socket.remoteAddress} for ${voucherNumber}` +
+        (slip ? ` with slip ${slip.name}` : " with no slip"));
+      drain().catch(() => {});
+      return json(res, 202, { ok: true, queued: name, slip: slip ? slip.name : null });
+    } catch (error) {
+      log("WARN", `Send request failed: ${error.message}`);
+      return json(res, 500, { ok: false, message: error.message });
+    }
   }
 
   if (req.method === "POST" && pathname === "/slip") {
@@ -656,6 +752,7 @@ function buildVoucherQuery(payload, filterExpr) {
 <NATIVEMETHOD>Guid</NATIVEMETHOD>
 <NATIVEMETHOD>VoucherNumber</NATIVEMETHOD>
 <NATIVEMETHOD>Date</NATIVEMETHOD>
+<NATIVEMETHOD>PartyLedgerName</NATIVEMETHOD>
 <NATIVEMETHOD>PartyGSTIN</NATIVEMETHOD>
 <NATIVEMETHOD>StateName</NATIVEMETHOD>
 <NATIVEMETHOD>Address</NATIVEMETHOD>
@@ -680,6 +777,36 @@ function buildVoucherQuery(payload, filterExpr) {
  * voucher — the real GUID. Returns null if Tally can't tell us, in which case the
  * job is retried rather than sent with a wrong total.
  */
+// The number TDL would have read off the ledger. A send started from the
+// phone has no voucher screen to read it from, so it is fetched here - and
+// fetched at drain time, which means a bill queued while Tally was shut gets
+// its number the moment Tally is back.
+async function ledgerMobile(partyName) {
+  const name = String(partyName || "").trim();
+  if (!name) return "";
+
+  const body = `<ENVELOPE>
+<HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>LedgerLookup</ID></HEADER>
+<BODY><DESC><STATICVARIABLES>
+<SVEXPORTFORMAT>$SysName:XML</SVEXPORTFORMAT>
+</STATICVARIABLES>
+<TDL><TDLMESSAGE>
+<COLLECTION NAME="LedgerLookup" ISINITIALIZE="Yes">
+<TYPE>Ledger</TYPE>
+<NATIVEMETHOD>Name</NATIVEMETHOD>
+<NATIVEMETHOD>LedgerMobile</NATIVEMETHOD>
+<FILTER>LedgerFilter</FILTER>
+</COLLECTION>
+<SYSTEM TYPE="Formulae" NAME="LedgerFilter">$Name = "${xmlEscape(name)}"</SYSTEM>
+</TDLMESSAGE></TDL>
+</DESC></BODY></ENVELOPE>`;
+
+  const xml = await tallyRequest(body, `mobile for ${name}`);
+  if (!xml) return "";
+  const m = /<LEDGERMOBILE[^>]*>([^<]*)/.exec(xml);
+  return m ? m[1].trim() : "";
+}
+
 async function enrichFromTally(payload) {
   const guid = String(payload.voucherGuid || "").trim();
   const byGuid = hasUsableGuid(guid);
@@ -826,6 +953,16 @@ async function enrichFromTally(payload) {
   const address = [...block.matchAll(/<ADDRESS>([^<]*)/g)].map((m) => m[1].trim()).filter(Boolean);
   if (address.length) out.partyAddress = address.slice(0, 4);
 
+  const party = tag(block, "PARTYLEDGERNAME");
+  if (party) out.partyLedgerName = party;
+
+  // Only when we have none: a number typed at the voucher screen is the
+  // operator's deliberate choice and must not be overwritten by the master.
+  if (!String(payload.partyPhone || "").trim()) {
+    const mobile = await ledgerMobile(party || payload.partyLedgerName);
+    if (mobile) out.partyPhone = mobile;
+  }
+
   const realGuid = (/<GUID[^>]*>([^<]*)/.exec(block) || [])[1];
   if (!byGuid && realGuid && hasUsableGuid(realGuid)) {
     out.voucherGuid = realGuid.trim();
@@ -879,7 +1016,7 @@ async function drain() {
         if (extra) {
           job.payload = { ...job.payload, ...extra };
           log("INFO", `Enriched ${job.payload.voucherNumber} from Tally: amount=${extra.amount}`);
-        } else if (job.attempts >= config.maxAttempts) {
+        } else if (Date.now() - Date.parse(job.firstSeenAt) > config.tallyPatienceMs) {
           // This path used to retry forever — jobs were seen at 96 attempts
           // against a cap of 12, because it never checked. A bill Tally cannot
           // price is never going to become sendable on its own, and silently
@@ -887,8 +1024,9 @@ async function drain() {
           await fsp.rename(filePath, path.join(config.deadLetterDir, name)).catch(() => {});
           log(
             "ERROR",
-            `Dead-lettered ${job.payload.voucherNumber}: Tally gave no amount after ` +
-              `${job.attempts} attempts. Is TallyPrime open with the company loaded?`
+            `Dead-lettered ${job.payload.voucherNumber}: Tally gave no amount in ` +
+              `${Math.round(config.tallyPatienceMs / 3600_000)}h over ${job.attempts} attempts. ` +
+              `Is TallyPrime open with the company loaded?`
           );
           continue;
         } else {
