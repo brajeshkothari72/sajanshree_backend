@@ -292,6 +292,29 @@ function renderInvoicePdf(invoice) {
       .text(company.terms, left, y, { width });
     doc.text("This is a computer-generated copy of the tax invoice.", left, doc.y + 2, { width });
 
+    // --- page 2: the dispatch slip -----------------------------------------
+    // A photograph of the physical slip, when one was supplied. Scaled to fit
+    // the page rather than cropped: a slip with the corner cut off is useless
+    // for checking against a delivery.
+    if (invoice.slipImage) {
+      try {
+        doc.addPage();
+        const art = doc.openImage(invoice.slipImage);
+        const capH = doc.page.height - PAGE_MARGIN * 2 - 26;
+        const scale = Math.min(width / art.width, capH / art.height);
+        const w = art.width * scale;
+        const h = art.height * scale;
+
+        doc.font("Helvetica-Bold").fontSize(10).fillColor(brand.navy)
+          .text(`Dispatch slip — invoice ${invoice.voucherNumber || ""}`, left, PAGE_MARGIN, { width });
+        doc.image(invoice.slipImage, left + (width - w) / 2, PAGE_MARGIN + 20, { width: w, height: h });
+      } catch (error) {
+        // A corrupt or unreadable photo must not cost the customer their
+        // invoice — page one is already complete and worth sending alone.
+        console.error(`⚠️ Could not attach dispatch slip to ${invoice.voucherNumber}: ${error.message}`);
+      }
+    }
+
     doc.end();
   });
 }

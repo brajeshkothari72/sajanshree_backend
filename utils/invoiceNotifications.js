@@ -105,7 +105,11 @@ async function sendInvoiceNotification(invoiceId) {
     let pdfUrl = null;
     if (Array.isArray(invoice.items) && invoice.items.length > 0) {
       try {
-        const buffer = await renderInvoicePdf(invoice);
+        // The slip arrives base64-encoded from the till; PDFKit wants bytes.
+        const forPdf = invoice.slipImageBase64
+          ? { ...invoice, slipImage: Buffer.from(invoice.slipImageBase64, "base64") }
+          : invoice;
+        const buffer = await renderInvoicePdf(forPdf);
         const url = await uploadInvoicePdf(buffer, invoice.voucherGuid || invoice._id);
 
         // Uploading is not the same as being fetchable. Cloudinary blocks PDF

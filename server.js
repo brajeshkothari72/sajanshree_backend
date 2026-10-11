@@ -9,7 +9,11 @@ const path = require("path");
 const app = express();
 
 // Middleware
-app.use(express.json()); // Parses incoming JSON requests
+// 12mb, not the 100kb default: a dispatch slip photographed on a phone arrives
+// base64-encoded inside the invoice payload, and a 5 MB photo inflates to about
+// 7 MB. Over the default the request is rejected with a bare 413 that gives no
+// hint the photo was the cause.
+app.use(express.json({ limit: "12mb" }));
 // CORS configuration
 const allowedOrigins = [
   "http://localhost:5173",

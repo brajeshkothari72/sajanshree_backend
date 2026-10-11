@@ -74,6 +74,11 @@ const tallyInvoiceSchema = new mongoose.Schema(
     // The companion issues one token per operator confirmation in Tally. We
     // store the last one we actually sent for, so a repeat of the same token
     // (a retry) stays quiet while a fresh Yes always sends.
+    // Base64 photo of the dispatch slip, when the operator supplied one before
+    // confirming. Stored so a cron retry can still rebuild the same two-page
+    // PDF hours later, by which time the file on the till may be gone.
+    slipImageBase64: { type: String },
+
     lastSendToken: { type: String },
 
     whatsappNotification: { type: whatsappNotificationSchema, default: undefined },

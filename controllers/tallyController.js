@@ -84,6 +84,7 @@ const createInvoiceNotification = async (req, res) => {
       partyState,
       partyAddress,
       dispatch,
+      slipImageBase64,
       amount,
     } = req.body || {};
 
@@ -172,6 +173,7 @@ const createInvoiceNotification = async (req, res) => {
             ...(partyState ? { partyState } : {}),
             ...(Array.isArray(partyAddress) && partyAddress.length ? { partyAddress } : {}),
             ...(dispatch && Object.keys(dispatch).length ? { dispatch } : {}),
+            ...(slipImageBase64 ? { slipImageBase64 } : {}),
           },
           // Clear the previous outcome so the sweep and the UI show this attempt,
           // not the one for the superseded bill.
@@ -211,6 +213,7 @@ const createInvoiceNotification = async (req, res) => {
         partyState,
         partyAddress: Array.isArray(partyAddress) ? partyAddress : [],
         dispatch: dispatch || undefined,
+        slipImageBase64: slipImageBase64 || undefined,
       });
     } catch (error) {
       // Two identical posts can race past the findOne above. The unique index is

@@ -146,6 +146,7 @@ function normalizePayload(raw) {
 async function ensureDirs() {
   await fsp.mkdir(config.queueDir, { recursive: true });
   await fsp.mkdir(config.deadLetterDir, { recursive: true });
+  await fsp.mkdir(slipDir(), { recursive: true });
 }
 
 function safeName(value) {
@@ -181,6 +182,60 @@ function confirmationToken(payload) {
   const token = `${payload.voucherGuid || "vch"}:${now}`;
   recentConfirmations.set(key, { token, at: now });
   return { token, repeat: false };
+}
+
+// A dispatch slip photographed at the counter, picked up from a watched folder.
+//
+// This matches how the shop actually decides: answer No in Tally while the goods
+// are still being loaded, drop the photo in, then Alt+J → Yes once it is ready.
+// No app, no login, no second system to learn — a folder someone can open from
+// the desktop and paste a photo into.
+//
+// Matched on the digits of the voucher number, so "441.jpg" finds 2026-27/441.
+// Voucher numbers contain a slash, which Windows will not allow in a filename,
+// and asking a busy counter to retype "2026-27-441" invites mismatches.
+const SLIP_EXTENSIONS = [".jpg", ".jpeg", ".png"];
+const MAX_SLIP_BYTES = 8 * 1024 * 1024;
+
+function slipDir() {
+  return config.slipDir || path.join(__dirname, "dispatch-slips");
+}
+
+async function findSlip(voucherNumber) {
+  const digits = String(voucherNumber || "").replace(/\D/g, "");
+  if (!digits) return null;
+
+  let names;
+  try {
+    names = await fsp.readdir(slipDir());
+  } catch {
+    return null; // folder not created yet — nothing to do
+  }
+
+  // Longest match wins: "441" must not be claimed by a file named "4410".
+  const candidates = names
+    .filter((n) => SLIP_EXTENSIONS.includes(path.extname(n).toLowerCase()))
+    .filter((n) => {
+      const stem = path.basename(n, path.extname(n)).replace(/\D/g, "");
+      return stem && (digits.endsWith(stem) || stem.endsWith(digits));
+    })
+    .sort((a, b) => b.length - a.length);
+
+  for (const name of candidates) {
+    const full = path.join(slipDir(), name);
+    try {
+      const stat = await fsp.stat(full);
+      if (stat.size > MAX_SLIP_BYTES) {
+        log("WARN", `Dispatch slip ${name} is ${(stat.size / 1048576).toFixed(1)} MB — too large, skipping`);
+        continue;
+      }
+      const bytes = await fsp.readFile(full);
+      return { name, full, base64: bytes.toString("base64") };
+    } catch {
+      /* being written right now — the next confirmation will find it */
+    }
+  }
+  return null;
 }
 
 async function enqueue(payload) {
@@ -297,6 +352,17 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { ok: true, duplicate: true });
     }
     payload.sendToken = token;
+
+    // Attach the dispatch slip if one is waiting. Read at confirmation time,
+    // not at send time: the operator put it there deliberately just now, and a
+    // retry hours later must use the same photo rather than whatever happens to
+    // be in the folder by then.
+    const slip = await findSlip(payload.voucherNumber);
+    if (slip) {
+      payload.slipImageBase64 = slip.base64;
+      payload.slipFileName = slip.name;
+      log("INFO", `Attached dispatch slip ${slip.name} to ${payload.voucherNumber}`);
+    }
 
     const name = await enqueue(payload);
     log("INFO", `Queued ${payload.voucherNumber} for ${payload.partyLedgerName} as ${name}`);
@@ -651,6 +717,19 @@ async function drain() {
       if (outcome.status >= 200 && outcome.status < 300) {
         await fsp.unlink(filePath).catch(() => {});
         log("INFO", `Sent ${job.payload.voucherNumber} (HTTP ${outcome.status})`);
+
+        // File the slip away once it has gone. Left in place it would be
+        // matched again by the next voucher whose number happens to share those
+        // digits, and a customer would receive someone else's dispatch slip.
+        if (job.payload.slipFileName) {
+          const from = path.join(slipDir(), job.payload.slipFileName);
+          const sentDir = path.join(slipDir(), "sent");
+          await fsp.mkdir(sentDir, { recursive: true }).catch(() => {});
+          const to = path.join(sentDir, `${Date.now()}-${job.payload.slipFileName}`);
+          await fsp.rename(from, to)
+            .then(() => log("INFO", `Filed dispatch slip ${job.payload.slipFileName} into sent/`))
+            .catch(() => {});
+        }
         continue;
       }
 

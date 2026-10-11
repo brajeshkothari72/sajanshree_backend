@@ -72,6 +72,24 @@ Note the division of responsibility — the companion retries *transport to the
 backend*; the backend retries *the WhatsApp send* via its own cron sweep. Neither
 retries the other's job, which is why a Slide outage can't cause duplicates.
 
+## Dispatch slips
+
+Drop a photo of the dispatch slip into `dispatch-slips/` named after the voucher
+number, then confirm in Tally. It is attached as page 2 of the invoice PDF.
+
+    dispatch-slips/441.jpg      ->  attaches to voucher 2026-27/441
+
+Matching is on digits only, because Windows will not allow the slash in
+"2026-27/441" in a filename. `.jpg`, `.jpeg` and `.png` are accepted, up to 8 MB.
+
+This fits the counter workflow: answer **No** in Tally while the goods are still
+being loaded, drop the photo in, then press **Alt+J** and answer **Yes**. The
+second Yes always sends - it is a new confirmation, not a duplicate.
+
+Sent slips move to `dispatch-slips/sent/`. That matters: a slip left in place
+would be matched again by the next voucher sharing those digits, and a customer
+would receive someone else’s paperwork.
+
 ## Operations
 
 ```powershell
