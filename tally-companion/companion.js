@@ -611,8 +611,7 @@ function buildVoucherQuery(payload, filterExpr) {
 <NATIVEMETHOD>BasicDestination</NATIVEMETHOD>
 <NATIVEMETHOD>BasicShipVesselNo</NATIVEMETHOD>
 <NATIVEMETHOD>BasicShippingDate</NATIVEMETHOD>
-<NATIVEMETHOD>EWayBillNo</NATIVEMETHOD>
-<NATIVEMETHOD>EWayBillDate</NATIVEMETHOD>
+<NATIVEMETHOD>EWayBillDetails</NATIVEMETHOD>
 <NATIVEMETHOD>AllInventoryEntries</NATIVEMETHOD>
 <NATIVEMETHOD>LedgerEntries</NATIVEMETHOD>
 <FILTER>VchFilter</FILTER>
@@ -716,13 +715,14 @@ async function enrichFromTally(payload) {
   }
   if (taxes.length) out.taxes = taxes;
 
-  // Dispatch and e-way details. Every one of these field names was verified
-  // valid against this company's Tally on 11-Oct-2026, but all were empty — the
-  // Dispatch Details screen is not being filled in. They are collected anyway so
-  // they appear the day someone starts entering them, with no code change.
+  // Dispatch details, from the Dispatch Details screen.
   //
   // Tally omits empty fields entirely rather than returning blanks, so absence
-  // here means "not entered", not "not supported".
+  // here means "not entered", not "not supported" — which is exactly how this
+  // was misread once: an empty result was reported to the operator as "your
+  // vouchers have no dispatch data" when the real fault was asking for too many
+  // NATIVEMETHODs at once, which makes the whole collection come back empty with
+  // no error at all.
   const dispatch = {};
   for (const [key, tagName] of [
     ["deliveryNote", "BASICDELIVERYNOTE"],
@@ -731,12 +731,38 @@ async function enrichFromTally(payload) {
     ["destination", "BASICDESTINATION"],
     ["vehicleNo", "BASICSHIPVESSELNO"],
     ["date", "BASICSHIPPINGDATE"],
-    ["ewayBillNo", "EWAYBILLNO"],
-    ["ewayBillDate", "EWAYBILLDATE"],
   ]) {
     const value = tag(block, tagName);
     if (value) dispatch[key] = value;
   }
+
+  // e-Way bill lives in a nested EWAYBILLDETAILS.LIST, and the number is under
+  // BILLNUMBER — not EWayBillNo, which is the obvious guess and returns nothing.
+  // Parsed from that block alone so a TRANSPORTERNAME elsewhere in the voucher
+  // cannot be mistaken for the e-way one.
+  const ewb = /<EWAYBILLDETAILS\.LIST>([\s\S]*?)<\/EWAYBILLDETAILS\.LIST>/.exec(block);
+  if (ewb) {
+    const section = ewb[1];
+    for (const [key, tagName] of [
+      ["ewayBillNo", "BILLNUMBER"],
+      ["ewayBillDate", "BILLDATE"],
+      ["dispatchFrom", "CONSIGNORPLACE"],
+      ["shipTo", "CONSIGNEEPLACE"],
+      ["transporterName", "TRANSPORTERNAME"],
+      ["transporterId", "TRANSPORTERID"],
+      ["distanceKm", "DISTANCE"],
+      ["transportMode", "TRANSPORTMODE"],
+    ]) {
+      // CONSIGNEEPLACE arrives with a leading tab in real data.
+      const value = tag(section, tagName).replace(/\s+/g, " ").trim();
+      if (value) dispatch[key] = value;
+    }
+    // VEHICLENUMBER only appears once Part B is filled in; prefer it over the
+    // Dispatch Details vessel field, which is a different thing.
+    const vehicle = tag(section, "VEHICLENUMBER").trim();
+    if (vehicle) dispatch.vehicleNo = vehicle;
+  }
+
   if (Object.keys(dispatch).length) out.dispatch = dispatch;
 
   const gstin = tag(block, "PARTYGSTIN");

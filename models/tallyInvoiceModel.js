@@ -69,6 +69,12 @@ const tallyInvoiceSchema = new mongoose.Schema(
       date: String,
       ewayBillNo: String,
       ewayBillDate: String,
+      dispatchFrom: String,
+      shipTo: String,
+      transporterName: String,
+      transporterId: String,
+      distanceKm: String,
+      transportMode: String,
     },
 
     // The companion issues one token per operator confirmation in Tally. We

@@ -152,31 +152,66 @@ function renderInvoicePdf(invoice) {
     // rather than an absence.
     const d = invoice.dispatch || {};
     const dispatchRows = [
+      // e-Way bill first: it is the detail a checkpoint asks for, and burying it
+      // among the dispatch rows makes it hard to find in a hurry.
+      ["E-Way Bill No.", d.ewayBillNo],
+      ["E-Way Bill Date", d.ewayBillDate ? formatDate(d.ewayBillDate) : ""],
+      ["Dispatch from", d.dispatchFrom],
+      ["Ship to", d.shipTo],
+      ["Transporter", d.transporterName],
+      ["Transporter ID", d.transporterId],
+      ["Distance", d.distanceKm ? `${d.distanceKm.trim()} km` : ""],
+      ["Mode", d.transportMode],
+      ["Motor Vehicle No.", d.vehicleNo],
       ["Delivery Note", d.deliveryNote],
       ["Dispatch Doc No.", d.docNo],
       ["Dispatched through", d.through],
       ["Destination", d.destination],
-      ["Motor Vehicle No.", d.vehicleNo],
       ["Dispatch Date", d.date ? formatDate(d.date) : ""],
-      ["E-Way Bill No.", d.ewayBillNo],
-      ["E-Way Bill Date", d.ewayBillDate ? formatDate(d.ewayBillDate) : ""],
     ].filter(([, v]) => String(v || "").trim());
+
+    // Labels drawn on a highlighter band.
+    const highlighted = new Set(["Dispatch Doc No."]);
 
     if (dispatchRows.length) {
       const rowsPerCol = Math.ceil(dispatchRows.length / 2);
-      const boxH = 16 + rowsPerCol * 12 + 6;
+      const boxH = 16 + rowsPerCol * 13 + 6;
       doc.rect(left, y, width, boxH).fillAndStroke(brand.band, brand.rule);
       doc.font("Helvetica-Bold").fontSize(8.5).fillColor(brand.navy)
         .text("DISPATCH DETAILS", left + 8, y + 5);
 
+      // Two unequal columns: the left one carries the addresses, which are the
+      // only values long enough to need the room.
+      const colW = [width * 0.56, width * 0.44];
+      const LABEL_W = 84;
+
       dispatchRows.forEach(([label, value], i) => {
         const col = Math.floor(i / rowsPerCol);
-        const rowY = y + 18 + (i % rowsPerCol) * 12;
-        const cx = left + 8 + col * (width / 2);
+        const rowY = y + 18 + (i % rowsPerCol) * 13;
+        const cx = left + 8 + col * colW[0];
+        const valueW = colW[col] - LABEL_W - 16;
+        const text = String(value);
+
+        // The dispatch doc number is what the transporter and the customer's
+        // gate quote back at each other, so it gets a highlighter band.
+        if (highlighted.has(label)) {
+          doc.rect(cx - 4, rowY - 2.5, colW[col] - 8, 13).fill("#FFF1B8");
+        }
+
         doc.font("Helvetica").fontSize(8.5).fillColor(brand.muted)
-          .text(label, cx, rowY, { width: 96, lineBreak: false });
-        doc.font("Helvetica-Bold").fontSize(8.5).fillColor(brand.ink)
-          .text(String(value), cx + 100, rowY, { width: width / 2 - 112, lineBreak: false });
+          .text(label, cx, rowY, { width: LABEL_W, lineBreak: false });
+
+        // Shrink rather than wrap. A wrapped value used to run straight over the
+        // row beneath it — "ANDHRA PRADESH-533341" landed on top of the
+        // transporter's name and both became unreadable.
+        doc.font("Helvetica-Bold").fillColor(brand.navy);
+        let size = 8.5;
+        while (size > 6.5 && doc.fontSize(size).widthOfString(text) > valueW) size -= 0.25;
+        doc.fontSize(size).text(text, cx + LABEL_W + 4, rowY + (8.5 - size) / 2, {
+          width: valueW,
+          lineBreak: false,
+          ellipsis: true,
+        });
       });
       y += boxH + 10;
     }
