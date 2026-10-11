@@ -14,3 +14,6 @@ tally-companion/dead-letter/
 tally-companion/*.log
 
 tally-companion/slip-token.txt
+
+# Dispatch slip photos are real customer paperwork. Never commit them.
+tally-companion/dispatch-slips/

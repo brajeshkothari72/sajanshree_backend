@@ -508,7 +508,8 @@ const server = http.createServer(async (req, res) => {
         // The all-zeros placeholder TDL sends for an unsaved voucher, which
         // enrichment already knows to replace with the real GUID.
         voucherGuid: "00000000-0000-0000-0000-000000000000",
-        companyName: body.companyName || "",
+        // Left out on purpose when the caller has none: see buildVoucherQuery.
+        ...(body.companyName ? { companyName: String(body.companyName) } : {}),
       };
 
       const { token, repeat } = confirmationToken(payload);
@@ -698,7 +699,25 @@ function looksLikeTallyPrime(xml) {
   return !/LINEERROR|TALLYREQUEST&gt; not found/i.test(xml);
 }
 
-async function tallyRequest(body, label) {
+// One Tally request at a time.
+//
+// TallyPrime's gateway is a single-threaded add-on to a desktop app, not a
+// server. Overlapping requests were reaching it as soon as the phone page
+// existed - the page loads the bill list while the queue is enriching, and
+// both are heavy voucher collections. On 11-Oct-2026 Tally died with
+// "Software Exception c0000005 (Memory Access Violation)" moments after two
+// of them overlapped. Serialising costs nothing here - there is one till and
+// one operator - and removes a whole class of ways to take the books down.
+let tallyChain = Promise.resolve();
+
+function tallyRequest(body, label) {
+  const run = tallyChain.then(() => tallyRequestNow(body, label), () => tallyRequestNow(body, label));
+  // The chain must never reject, or every later request is skipped.
+  tallyChain = run.catch(() => {});
+  return run;
+}
+
+async function tallyRequestNow(body, label) {
   const urls = knownGoodTallyUrl
     ? [knownGoodTallyUrl, ...TALLY_CANDIDATES().filter((u) => u !== knownGoodTallyUrl)]
     : TALLY_CANDIDATES();
@@ -738,11 +757,22 @@ function hasUsableGuid(guid) {
 }
 
 function buildVoucherQuery(payload, filterExpr) {
+  // An EMPTY <SVCURRENTCOMPANY> crashes TallyPrime outright - "Software
+  // Exception c0000005 (Memory Access Violation)", the whole application
+  // gone, twice, on live books. Omitting the tag is fine and means "whatever
+  // company is loaded", which is what recentVouchers has always done.
+  //
+  // TDL always filled this in, so it was never empty until a send could be
+  // started from the phone, where there is no voucher screen to read it from.
+  const company = String(payload.companyName || "").trim();
+  const companyTag = company
+    ? `<SVCURRENTCOMPANY>${xmlEscape(company)}</SVCURRENTCOMPANY>`
+    : "";
   return `<ENVELOPE>
 <HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>VchLookup</ID></HEADER>
 <BODY><DESC><STATICVARIABLES>
 <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-<SVCURRENTCOMPANY>${xmlEscape(payload.companyName || "")}</SVCURRENTCOMPANY>
+${companyTag}
 <SVFROMDATE TYPE="Date">20200401</SVFROMDATE>
 <SVTODATE TYPE="Date">20990331</SVTODATE>
 </STATICVARIABLES>
