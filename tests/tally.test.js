@@ -9,7 +9,7 @@ process.env.SLIDE_WHATSAPP_INVOICE_TEMPLATE = 'invoice_notification';
 process.env.SLIDE_WHATSAPP_LANGUAGE = 'en';
 
 const { parseTallyDate } = require('../controllers/tallyController');
-const { buildInvoiceParams, invoiceTemplateName } = require('../utils/invoiceNotifications');
+const { buildInvoiceParams, invoiceForPdf, invoiceTemplateName } = require('../utils/invoiceNotifications');
 const { normalizePayload } = require('../tally-companion/companion');
 
 // --- Tally date parsing ------------------------------------------------------
@@ -240,4 +240,46 @@ test('a corrected amount is a new confirmation, not a repeat', () => {
   confirmationToken({ voucherGuid: guid, amount: 100, partyPhone: '91' });
   const changed = confirmationToken({ voucherGuid: guid, amount: 250, partyPhone: '91' });
   assert.strictEqual(changed.repeat, false);
+});
+
+// --- what the PDF renderer is handed -----------------------------------------
+//
+// A live invoice is a Mongoose document, not a plain object. Spreading one
+// copies $__ and _doc and no schema fields at all, so an invoice carrying a
+// slip went to the customer as a blank tax invoice - right letterhead, right
+// slip on page 2, nothing in between. It passed every test here because the
+// tests used plain objects, which spread fine.
+
+test('keeps every field when a slip is attached to a Mongoose document', () => {
+  const mongoose = require('mongoose');
+  const Doc = mongoose.model(
+    'InvoiceForPdfFixture',
+    new mongoose.Schema({
+      voucherNumber: String,
+      partyLedgerName: String,
+      amount: Number,
+      items: [{ name: String, amount: Number }],
+      slipImageBase64: String,
+    })
+  );
+
+  const doc = new Doc({
+    voucherNumber: '2026-27/441',
+    partyLedgerName: 'Sri Durga Cutpiece Dwarpudi',
+    amount: 60480,
+    items: [{ name: 'Shirt', amount: 57600 }],
+    slipImageBase64: Buffer.from('not-really-a-png').toString('base64'),
+  });
+
+  const out = invoiceForPdf(doc);
+  assert.strictEqual(out.voucherNumber, '2026-27/441');
+  assert.strictEqual(out.partyLedgerName, 'Sri Durga Cutpiece Dwarpudi');
+  assert.strictEqual(out.amount, 60480);
+  assert.strictEqual(out.items.length, 1);
+  assert.ok(Buffer.isBuffer(out.slipImage), 'the slip must reach PDFKit as bytes');
+});
+
+test('passes the invoice straight through when there is no slip', () => {
+  const invoice = { voucherNumber: '2026-27/442', items: [] };
+  assert.strictEqual(invoiceForPdf(invoice), invoice);
 });

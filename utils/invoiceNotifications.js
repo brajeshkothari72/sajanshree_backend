@@ -69,6 +69,19 @@ function buildInvoiceParams(invoice) {
   ].map((text) => ({ type: "text", text: sanitizeParam(text) }));
 }
 
+// What renderInvoicePdf is given.
+//
+// toObject() is load-bearing. Spreading a Mongoose document copies its
+// internals ($__ and _doc) and NOT a single schema field, so the PDF came out
+// blank - no party, no items, no total - while the slip on page 2 rendered
+// perfectly. It only ever broke on invoices carrying a slip, because that is
+// the only branch that spreads.
+function invoiceForPdf(invoice) {
+  if (!invoice.slipImageBase64) return invoice;
+  const plain = typeof invoice.toObject === "function" ? invoice.toObject() : invoice;
+  // The slip arrives base64-encoded from the till; PDFKit wants bytes.
+  return { ...plain, slipImage: Buffer.from(invoice.slipImageBase64, "base64") };
+}
 /**
  * Send the WhatsApp notification for one stored invoice and persist the outcome.
  * Never throws — callers treat the returned object as the result.
@@ -105,10 +118,7 @@ async function sendInvoiceNotification(invoiceId) {
     let pdfUrl = null;
     if (Array.isArray(invoice.items) && invoice.items.length > 0) {
       try {
-        // The slip arrives base64-encoded from the till; PDFKit wants bytes.
-        const forPdf = invoice.slipImageBase64
-          ? { ...invoice, slipImage: Buffer.from(invoice.slipImageBase64, "base64") }
-          : invoice;
+        const forPdf = invoiceForPdf(invoice);
         const buffer = await renderInvoicePdf(forPdf);
         const url = await uploadInvoicePdf(buffer, invoice.voucherGuid || invoice._id);
 
@@ -211,6 +221,7 @@ async function persist(invoice, notification) {
 
 module.exports = {
   buildInvoiceParams,
+  invoiceForPdf,
   invoiceTemplateName,
   invoiceDocumentTemplateName,
   sendInvoiceNotification,
