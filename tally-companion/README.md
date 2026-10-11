@@ -74,8 +74,19 @@ retries the other's job, which is why a Slide outage can't cause duplicates.
 
 ## Dispatch slips
 
-Drop a photo of the dispatch slip into `dispatch-slips/` named after the voucher
-number, then confirm in Tally. It is attached as page 2 of the invoice PDF.
+The counter photographs the slip with a **phone on the shop wifi**. Open the URL
+the companion logs at startup once on that phone and save it to the home screen:
+
+    Slip page for the counter phone: http://192.168.2.188:5111/?k=<token>
+
+Then the whole job is: tap the icon, tap the camera button, take the photo. The
+newest bill is already selected, the upload starts as soon as the shutter goes,
+and the page says what to do next. Back in Tally, **Alt+J** and **Yes**.
+
+The same page on the till's own browser is a normal file picker, so a slip that
+arrives as a file can still be attached from the PC.
+
+Slips can also just be dropped into `dispatch-slips/` named after the voucher:
 
     dispatch-slips/441.jpg      ->  attaches to voucher 2026-27/441
 
@@ -83,13 +94,40 @@ Matching is on digits only, because Windows will not allow the slash in
 "2026-27/441" in a filename. `.jpg`, `.jpeg` and `.png` are accepted, up to 8 MB.
 
 This fits the counter workflow: answer **No** in Tally while the goods are still
-being loaded, drop the photo in, then press **Alt+J** and answer **Yes**. The
-second Yes always sends - it is a new confirmation, not a duplicate.
+being loaded, add the photo, then press **Alt+J** and answer **Yes**. The second
+Yes always sends - it is a new confirmation, not a duplicate.
 
 Sent slips move to `dispatch-slips/sent/`. That matters: a slip left in place
 would be matched again by the next voucher sharing those digits, and a customer
-would receive someone else’s paperwork.
+would receive someone else's paperwork.
 
+### Why the port is open to the wifi, and what that does not open
+
+The phone needs to reach this port, so the server binds every interface rather
+than loopback. The request handler then splits callers in two:
+
+| | from this PC | from the wifi |
+|---|---|---|
+| `/enqueue` | yes | **never** |
+| `/health` | yes | no |
+| `/`, `/slip`, `/recent-vouchers`, `/pending-slips` | yes | only with `?k=<token>` |
+
+`/enqueue` is the endpoint that spends money sending WhatsApp messages as the
+business. It stays loopback-only with or without a token, so the worst a hostile
+device on the wifi can do - after guessing a 64-bit token - is read recent bill
+numbers and write a slip image.
+
+The token is generated on first run and kept in `slip-token.txt` (gitignored).
+Delete that file and restart to rotate it; every saved bookmark then needs
+re-saving.
+
+**The till's IP comes from DHCP**, so it can change and silently break the saved
+bookmark - the page simply stops opening. Give the PC a fixed address, or a DHCP
+reservation on the router, before relying on this.
+
+The shop wifi (`SAJAN_SHREE_GARMENTS`) is a *Public* network in Windows, and
+node.exe already has an inbound allow rule for that profile. If the phone cannot
+reach the page, check that rule first.
 ## Operations
 
 ```powershell

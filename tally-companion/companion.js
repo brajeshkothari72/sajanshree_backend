@@ -22,6 +22,8 @@ const http = require("node:http");
 const fs = require("node:fs");
 const fsp = require("node:fs/promises");
 const path = require("node:path");
+const os = require("node:os");
+const crypto = require("node:crypto");
 
 // ---------------------------------------------------------------- configuration
 
@@ -197,6 +199,49 @@ function confirmationToken(payload) {
 const SLIP_EXTENSIONS = [".jpg", ".jpeg", ".png"];
 const MAX_SLIP_BYTES = 8 * 1024 * 1024;
 
+// --- reaching this from a phone on the shop wifi -------------------------
+//
+// The counter photographs the dispatch slip with a phone. For that the page
+// has to be reachable from the wifi, which means this port is no longer
+// loopback-only and the old "it is local, so it needs no login" reasoning
+// stops holding.
+//
+// So two rules, both enforced in the request handler:
+//   - /enqueue and /health stay loopback-only. /enqueue is what sends a
+//     WhatsApp message as the business; it must never be reachable from the
+//     wifi, with or without a token.
+//   - the slip pages are reachable from the wifi, but only with ?k=<token>.
+//
+// The token is generated once and kept in slip-token.txt (gitignored). It is
+// baked into the bookmark saved on the phone, so nobody types it.
+const TOKEN_PATH = path.join(__dirname, "slip-token.txt");
+
+function slipToken() {
+  try {
+    const existing = fs.readFileSync(TOKEN_PATH, "utf8").trim();
+    if (existing) return existing;
+  } catch { /* first run */ }
+  const fresh = crypto.randomBytes(8).toString("hex");
+  fs.writeFileSync(TOKEN_PATH, fresh);
+  return fresh;
+}
+
+const SLIP_TOKEN = slipToken();
+const SLIP_PATHS = new Set(["/", "/slip", "/recent-vouchers", "/pending-slips"]);
+
+// ::ffff:127.0.0.1 is how a v4 loopback arrives on a dual-stack socket.
+const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
+
+// The address a phone on the shop wifi should use.
+function lanAddress() {
+  for (const entries of Object.values(os.networkInterfaces())) {
+    for (const e of entries || []) {
+      if (e.family === "IPv4" && !e.internal) return e.address;
+    }
+  }
+  return null;
+}
+
 function slipDir() {
   return config.slipDir || path.join(__dirname, "dispatch-slips");
 }
@@ -338,7 +383,16 @@ function json(res, status, body) {
 }
 
 const server = http.createServer(async (req, res) => {
-  if (req.method === "GET" && req.url.startsWith("/health")) {
+  const { pathname, searchParams } = new URL(req.url, "http://companion");
+
+  if (!LOOPBACK.has(req.socket.remoteAddress)) {
+    if (!SLIP_PATHS.has(pathname) || searchParams.get("k") !== SLIP_TOKEN) {
+      log("WARN", `Refused ${req.method} ${pathname} from ${req.socket.remoteAddress}`);
+      return json(res, 403, { ok: false, message: "Not allowed from this device." });
+    }
+  }
+
+  if (req.method === "GET" && pathname === "/health") {
     const queued = await fsp.readdir(config.queueDir).catch(() => []);
     return json(res, 200, {
       ok: true,
@@ -353,7 +407,7 @@ const server = http.createServer(async (req, res) => {
   // runs an HTTP server on this machine, so there is nothing extra to install,
   // start or keep alive. Bound to 127.0.0.1 like everything else, so it is
   // reachable from this till and nowhere else — which is why it needs no login.
-  if (req.method === "GET" && (req.url === "/" || req.url.startsWith("/slip"))) {
+  if (req.method === "GET" && (pathname === "/" || pathname === "/slip")) {
     try {
       const html = await fsp.readFile(path.join(__dirname, "slip-page.html"));
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Content-Length": html.length });
@@ -365,11 +419,11 @@ const server = http.createServer(async (req, res) => {
 
   // Recent sales bills, so the counter picks from a list instead of retyping a
   // voucher number — mistyping it means the slip silently never attaches.
-  if (req.method === "GET" && req.url.startsWith("/recent-vouchers")) {
+  if (req.method === "GET" && pathname === "/recent-vouchers") {
     return json(res, 200, await recentVouchers());
   }
 
-  if (req.method === "GET" && req.url.startsWith("/pending-slips")) {
+  if (req.method === "GET" && pathname === "/pending-slips") {
     const out = [];
     try {
       for (const name of await fsp.readdir(slipDir())) {
@@ -385,7 +439,7 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, out);
   }
 
-  if (req.method === "POST" && req.url.startsWith("/slip")) {
+  if (req.method === "POST" && pathname === "/slip") {
     try {
       const body = JSON.parse(await readBody(req, 12_000_000));
       const digits = String(body.voucherNumber || "").replace(/\D/g, "");
@@ -415,7 +469,7 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
-  if (req.method !== "POST" || !req.url.startsWith("/enqueue")) {
+  if (req.method !== "POST" || pathname !== "/enqueue") {
     return json(res, 404, { ok: false, message: "Not found" });
   }
 
@@ -916,12 +970,18 @@ async function drain() {
 async function main() {
   await ensureDirs();
 
-  // 127.0.0.1 only, never 0.0.0.0. The sole client is TDL on this same machine,
-  // and binding wider would expose an unauthenticated enqueue endpoint to the
-  // shop LAN — anyone on the wifi could send WhatsApp messages as the business.
-  server.listen(config.port, "127.0.0.1", () => {
+  // Bound to every interface so a phone on the shop wifi can reach the slip
+  // page. That is safe only because of the gate at the top of the request
+  // handler: off-machine callers get the slip pages and nothing else, and only
+  // with the token. /enqueue - the one that spends money sending WhatsApp
+  // messages as the business - never leaves this machine.
+  server.listen(config.port, "0.0.0.0", () => {
     log("INFO", `Companion listening on http://127.0.0.1:${config.port}`);
     log("INFO", `Forwarding to ${config.apiBaseUrl}`);
+    const lan = lanAddress();
+    if (lan) {
+      log("INFO", `Slip page for the counter phone: http://${lan}:${config.port}/?k=${SLIP_TOKEN}`);
+    }
   });
 
   setInterval(() => drain().catch(() => {}), config.pollIntervalMs);

@@ -12,3 +12,5 @@ tally-companion/config.json
 tally-companion/queue/
 tally-companion/dead-letter/
 tally-companion/*.log
+
+tally-companion/slip-token.txt
