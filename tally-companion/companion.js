@@ -1146,9 +1146,14 @@ async function main() {
   server.listen(config.port, "0.0.0.0", () => {
     log("INFO", `Companion listening on http://127.0.0.1:${config.port}`);
     log("INFO", `Forwarding to ${config.apiBaseUrl}`);
+    // The name first, the address second. DHCP moves the address on every
+    // reboot and the saved bookmark then silently stops opening, with nothing
+    // to tell the counter why. The machine answers to its own name on the
+    // LAN, so a bookmark built on that survives.
+    log("INFO", `Slip page for the counter phone: http://${os.hostname().toLowerCase()}.local:${config.port}/?k=${SLIP_TOKEN}`);
     const lan = lanAddress();
     if (lan) {
-      log("INFO", `Slip page for the counter phone: http://${lan}:${config.port}/?k=${SLIP_TOKEN}`);
+      log("INFO", `  (or by address, if the phone cannot resolve .local: http://${lan}:${config.port}/?k=${SLIP_TOKEN})`);
     }
   });
 

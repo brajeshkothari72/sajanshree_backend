@@ -77,7 +77,7 @@ retries the other's job, which is why a Slide outage can't cause duplicates.
 The counter photographs the slip with a **phone on the shop wifi**. Open the URL
 the companion logs at startup once on that phone and save it to the home screen:
 
-    Slip page for the counter phone: http://192.168.2.188:5111/?k=<token>
+    Slip page for the counter phone: http://ssg-pc.local:5111/?k=<token>
 
 Then the whole job is: tap the icon, tap the camera button, take the photo. The
 newest bill is already selected, the upload starts as soon as the shutter goes,
@@ -121,9 +121,13 @@ The token is generated on first run and kept in `slip-token.txt` (gitignored).
 Delete that file and restart to rotate it; every saved bookmark then needs
 re-saving.
 
-**The till's IP comes from DHCP**, so it can change and silently break the saved
-bookmark - the page simply stops opening. Give the PC a fixed address, or a DHCP
-reservation on the router, before relying on this.
+**Use the name, not the address.** The till's IP comes from DHCP and moves on
+almost every reboot - observed going .188 -> .200 overnight - and the saved
+bookmark then stops opening with nothing to say why. `ssg-pc.local` resolves
+over mDNS from the phone and survives that, which is why the startup log leads
+with it. The address is printed underneath only for a phone too old to resolve
+`.local`; if you end up on that one, pin the IP with a DHCP reservation on the
+router instead.
 
 The shop wifi (`SAJAN_SHREE_GARMENTS`) is a *Public* network in Windows, and
 node.exe already has an inbound allow rule for that profile. If the phone cannot
