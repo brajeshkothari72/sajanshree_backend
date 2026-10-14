@@ -85,7 +85,7 @@ const productRoutes = require("./routes/productRoutes");
 const customerRoutes = require("./routes/customerRoutes");
 const tallyRoutes = require("./routes/tallyRoutes");
 const counterRoutes = require("./routes/counterRoutes");
-const { claimInvite } = require("./controllers/counterController");
+const { showClaimPage, confirmClaim } = require("./controllers/counterController");
 
 // Use Routes
 app.use("/api/orders", orderRoutes);
@@ -104,7 +104,10 @@ app.use("/api/counter", counterRoutes);
 // same origin as the API it calls. That is what lets the device cookie work at
 // all - cross-site it would need CORS credentials and a Secure/None cookie that
 // several mobile browsers quietly drop.
-app.get("/slips/claim/:code", claimInvite);
+// GET shows a page with one button; POST (a real tap, never a crawler)
+// actually registers the device. See the comment on showClaimPage.
+app.get("/slips/claim/:code", showClaimPage);
+app.post("/slips/claim/:code", express.urlencoded({ extended: false }), confirmClaim);
 app.get("/slips", (req, res) => res.sendFile(require("path").join(__dirname, "public", "slips.html")));
 
 const mongoose = require("mongoose");

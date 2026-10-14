@@ -70,7 +70,31 @@ async function revokeDevice(req, res) {
 
 // Opened by following the invite link. Plants the cookie and sends the phone on
 // to the page, so the person sees the bills and not a confirmation screen.
-async function claimInvite(req, res) {
+// Opened by following the invite link. Shows a page with ONE tap to confirm,
+// rather than registering the device on this GET itself.
+//
+// That used to be the whole handler, and it meant WhatsApp's own
+// link-preview crawler could burn a single-use invite before the person it
+// was sent to ever saw it - observed in practice: a link shared in a WhatsApp
+// chat was claimed nine seconds later by "WhatsApp/2.23.20.0", not a phone.
+// A crawler fetches a page; it does not submit a form, so gating the actual
+// registration behind a POST closes that off.
+async function showClaimPage(req, res) {
+  const device = await CounterDevice.findOne({ inviteCode: req.params.code });
+
+  if (!device || device.revokedAt) {
+    return res.status(410).send(claimFailed("This link has already been used, or was cancelled."));
+  }
+  if (device.inviteExpiresAt && device.inviteExpiresAt < new Date()) {
+    return res.status(410).send(claimFailed("This link has expired. Ask for a new one."));
+  }
+
+  res.send(claimPrompt(device.label, req.params.code));
+}
+
+// The tap. Registers the device, plants the cookie, sends the phone on to
+// the page it will actually use.
+async function confirmClaim(req, res) {
   const device = await CounterDevice.findOne({ inviteCode: req.params.code });
 
   if (!device || device.revokedAt) {
@@ -97,6 +121,20 @@ function claimFailed(message) {
 <body style="font:17px/1.5 system-ui,sans-serif;margin:0;padding:40px 24px;color:#1F2937">
 <h1 style="font-size:20px;color:#A81E24;margin:0 0 10px">Link not usable</h1>
 <p>${message}</p></body>`;
+
+// A minimal page with exactly one real control: a form, which only a human
+// tapping it will submit. A link-preview crawler fetches this and stops here.
+function claimPrompt(label, code) {
+  return `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Set up this phone</title>
+<body style="font:17px/1.5 system-ui,sans-serif;margin:0;padding:40px 24px;color:#1F2937;text-align:center">
+<h1 style="font-size:20px;color:#1B2F5E;margin:0 0 10px">${label}</h1>
+<p>This will remember this phone for the dispatch slip page. Do this on the phone that will actually be used at the counter.</p>
+<form method="POST" action="/slips/claim/${code}">
+<button type="submit" style="margin-top:16px;width:100%;max-width:320px;padding:16px;font-size:17px;font-weight:700;color:#fff;background:#1B2F5E;border:0;border-radius:12px;">Set up this phone</button>
+</form>
+</body>`;
+}
 }
 
 // --- the phone, doing the day's work -----------------------------------------
@@ -267,7 +305,8 @@ module.exports = {
   createInvite,
   listDevices,
   revokeDevice,
-  claimInvite,
+  showClaimPage,
+  confirmClaim,
   bills,
   uploadSlip,
   slipImage,
