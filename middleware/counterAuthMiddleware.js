@@ -12,6 +12,8 @@
 // key to the business.
 
 const crypto = require("crypto");
+const jwt = require("jsonwebtoken");
+const User = require("../models/userModel");
 const { CounterDevice } = require("../models/counterModels");
 
 const COOKIE_NAME = "ssg_counter";
@@ -61,6 +63,28 @@ function clearDeviceCookie(res) {
 }
 
 async function counterAuth(req, res, next) {
+  // The owner, from the admin dashboard, authenticates the way everywhere
+  // else in that app does - a JWT, not a device cookie. This lets the owner
+  // use bills/upload/send from the dashboard without that browser needing
+  // to be registered as a device of its own. It also has to work cross-origin
+  // (the admin dashboard calling this API from a different host), where a
+  // cookie set here would not be sent along anyway.
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith("Bearer ")) {
+    try {
+      const decoded = jwt.verify(authHeader.slice(7), process.env.JWT_SECRET);
+      const user = await User.findById(decoded.id).select("-password");
+      if (user) {
+        req.counterDevice = null; // owner, not a registered phone
+        return next();
+      }
+    } catch {
+      // Not a valid admin token. Fall through to the device-cookie check -
+      // a stale or absent token here must not block a request that is
+      // actually carrying a good device cookie instead.
+    }
+  }
+
   const token = readCookie(req, COOKIE_NAME);
   if (!token) {
     return res.status(401).json({ message: "This device is not registered.", needsInvite: true });

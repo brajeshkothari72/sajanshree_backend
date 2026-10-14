@@ -2,8 +2,6 @@ node_modules/
 uploads/
 
 # Secrets — never commit these
-.env
-.env.*
 !.env.example
 
 # Tally companion service: config.json carries a live TALLY_API_KEY, and the
@@ -17,3 +15,4 @@ tally-companion/slip-token.txt
 
 # Dispatch slip photos are real customer paperwork. Never commit them.
 tally-companion/dispatch-slips/
+config.bat
