@@ -121,6 +121,7 @@ function claimFailed(message) {
 <body style="font:17px/1.5 system-ui,sans-serif;margin:0;padding:40px 24px;color:#1F2937">
 <h1 style="font-size:20px;color:#A81E24;margin:0 0 10px">Link not usable</h1>
 <p>${message}</p></body>`;
+}
 
 // A minimal page with exactly one real control: a form, which only a human
 // tapping it will submit. A link-preview crawler fetches this and stops here.
@@ -134,7 +135,6 @@ function claimPrompt(label, code) {
 <button type="submit" style="margin-top:16px;width:100%;max-width:320px;padding:16px;font-size:17px;font-weight:700;color:#fff;background:#1B2F5E;border:0;border-radius:12px;">Set up this phone</button>
 </form>
 </body>`;
-}
 }
 
 // --- the phone, doing the day's work -----------------------------------------
