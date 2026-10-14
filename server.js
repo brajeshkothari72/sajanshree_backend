@@ -84,6 +84,8 @@ const userRoutes = require("./routes/userRoutes");
 const productRoutes = require("./routes/productRoutes");
 const customerRoutes = require("./routes/customerRoutes");
 const tallyRoutes = require("./routes/tallyRoutes");
+const counterRoutes = require("./routes/counterRoutes");
+const { claimInvite } = require("./controllers/counterController");
 
 // Use Routes
 app.use("/api/orders", orderRoutes);
@@ -93,6 +95,17 @@ app.use("/api/customers", customerRoutes);
 // Called by the TallyPrime companion service on the shop PC. Not a browser
 // origin, so the CORS allowlist above doesn't apply to it.
 app.use("/api/tally", tallyRoutes);
+
+// The dispatch-slip counter. Three audiences behind one prefix, each with its
+// own auth: the owner's JWT, a registered phone's cookie, the till's shared key.
+app.use("/api/counter", counterRoutes);
+
+// The page itself is served from here rather than the dashboard, so it is the
+// same origin as the API it calls. That is what lets the device cookie work at
+// all - cross-site it would need CORS credentials and a Secure/None cookie that
+// several mobile browsers quietly drop.
+app.get("/slips/claim/:code", claimInvite);
+app.get("/slips", (req, res) => res.sendFile(require("path").join(__dirname, "public", "slips.html")));
 
 const mongoose = require("mongoose");
 

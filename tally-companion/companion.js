@@ -59,6 +59,10 @@ function loadConfig() {
     // dead-lettered. Counted in elapsed time, not attempts: Tally being shut
     // overnight is normal, and 12 tries is barely an hour.
     tallyPatienceMs: Number(fileConfig.tallyPatienceMs || 24 * 3600_000),
+    // How often to ask the backend for work. Ten seconds is the gap between
+    // the counter tapping Send and the message going; anything slower feels
+    // broken to someone standing there holding a parcel.
+    counterPollMs: Number(fileConfig.counterPollMs || 10000),
     tallyGatewayUrl: fileConfig.tallyGatewayUrl || "http://127.0.0.1:9000",
     tallyTimeoutMs: Number(fileConfig.tallyTimeoutMs || 20000),
   };
@@ -1005,6 +1009,79 @@ async function enrichFromTally(payload) {
 
 let draining = false;
 
+// --- working for the counter page, from outside the shop --------------------
+//
+// The phone cannot reach this machine: it is behind a domestic router on a
+// DHCP address that moves, and opening a port to the street to fix that would
+// put the books on the internet. So the arrow is turned around - nothing
+// reaches in, this reaches out and asks for work.
+//
+// It costs one small request every ten seconds and buys: no port forwarding,
+// no fixed address, no router configuration, and a page that keeps working
+// when this machine is switched off.
+
+async function counterCall(path, init) {
+  const response = await fetch(`${config.apiBaseUrl}/api/counter${path}`, {
+    headers: { "Content-Type": "application/json", "X-Api-Key": config.apiKey },
+    signal: AbortSignal.timeout(config.requestTimeoutMs),
+    ...init,
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json().catch(() => null);
+}
+
+// The bill list, pushed up so the phone has something to show. Sent even when
+// unchanged: the page prints how old this is, and a silent gap is exactly when
+// the counter most needs to know the till is not answering.
+async function pushSnapshot() {
+  const bills = await recentVouchers(40);
+  if (!bills.length) return; // Tally shut or mid-dialog - keep the last good list
+  await counterCall("/snapshot", { method: "POST", body: JSON.stringify({ bills }) });
+}
+
+// Work the counter asked for while we were not looking.
+async function pollCommands() {
+  const commands = await counterCall("/commands");
+  for (const command of commands || []) {
+    if (command.type !== "send") continue;
+
+    const payload = {
+      voucherNumber: command.voucherNumber,
+      partyLedgerName: command.partyLedgerName,
+      voucherType: "Sales",
+      // The placeholder TDL sends for an unsaved voucher; enrichment swaps it
+      // for the real one. Never an empty company name - that crashes Tally.
+      voucherGuid: "00000000-0000-0000-0000-000000000000",
+      // Reported back once the invoice has actually gone, not now, so the page
+      // says "sent" only when a customer really has it.
+      counterCommandId: command.id,
+    };
+    payload.sendToken = confirmationToken(payload).token;
+
+    // The slip is not fetched. It was uploaded straight to the backend, which
+    // is where the PDF is built, and it attaches itself there.
+    const name = await enqueue(payload);
+    log("INFO", `Counter asked for ${command.voucherNumber} (${command.partyLedgerName}) - queued as ${name}`);
+  }
+  if (commands && commands.length) drain().catch(() => {});
+}
+
+let snapshotTick = 0;
+async function counterPoll() {
+  try {
+    await pollCommands();
+    // Every sixth pass, so roughly once a minute.
+    if (snapshotTick % 6 === 0) await pushSnapshot();
+    snapshotTick += 1;
+  } catch (error) {
+    // Shop internet drops, Render sleeps, the laptop lid closes. All normal,
+    // all recovered by the next pass, and none of it worth a log line each
+    // time - that would bury everything that matters.
+    if (snapshotTick % 30 === 0) log("WARN", `Counter poll failing: ${error.message}`);
+    snapshotTick += 1;
+  }
+}
+
 async function forward(job) {
   const response = await fetch(`${config.apiBaseUrl}/api/tally/invoice-whatsapp`, {
     method: "POST",
@@ -1086,6 +1163,15 @@ async function drain() {
         await fsp.unlink(filePath).catch(() => {});
         log("INFO", `Sent ${job.payload.voucherNumber} (HTTP ${outcome.status})`);
 
+        // Tell the counter page. Only now - before this the customer did not
+        // have it, and a page claiming otherwise is worse than a slow page.
+        if (job.payload.counterCommandId) {
+          counterCall(`/commands/${job.payload.counterCommandId}`, {
+            method: "POST",
+            body: JSON.stringify({ ok: true }),
+          }).catch(() => {});
+        }
+
         // File the slip away once it has gone. Left in place it would be
         // matched again by the next voucher whose number happens to share those
         // digits, and a customer would receive someone else's dispatch slip.
@@ -1158,6 +1244,8 @@ async function main() {
   });
 
   setInterval(() => drain().catch(() => {}), config.pollIntervalMs);
+  setInterval(() => counterPoll(), config.counterPollMs);
+  counterPoll();
   await drain().catch(() => {});
 }
 

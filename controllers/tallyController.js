@@ -1,9 +1,26 @@
 const TallyInvoice = require("../models/tallyInvoiceModel");
 const { sendInvoiceNotification } = require("../utils/invoiceNotifications");
+const { DispatchSlip } = require("../models/counterModels");
 
 // Tally writes dates as YYYYMMDD (e.g. 20260812), not ISO. Accept both so the
 // companion service can forward whichever form it happens to have.
 const MONTHS = { jan:0, feb:1, mar:2, apr:3, may:4, jun:5, jul:6, aug:7, sep:8, oct:9, nov:10, dec:11 };
+
+// The slip the counter attached from a phone, if any.
+//
+// It is uploaded to this server, not relayed down to the till: the till has no
+// use for it, and a photo that never leaves the backend is one less thing to
+// move around. Best-effort - a bill is far better off sent without its slip
+// than not sent at all.
+async function storedSlip(voucherNumber) {
+  try {
+    const slip = await DispatchSlip.findOne({ voucherNumber: String(voucherNumber).trim() });
+    return slip?.imageBase64 || undefined;
+  } catch (error) {
+    console.error(`⚠️ Could not read a stored slip for ${voucherNumber}: ${error.message}`);
+    return undefined;
+  }
+}
 
 function parseTallyDate(value) {
   if (!value) return null;
@@ -213,7 +230,7 @@ const createInvoiceNotification = async (req, res) => {
         partyState,
         partyAddress: Array.isArray(partyAddress) ? partyAddress : [],
         dispatch: dispatch || undefined,
-        slipImageBase64: slipImageBase64 || undefined,
+        slipImageBase64: slipImageBase64 || (await storedSlip(voucherNumber)),
       });
     } catch (error) {
       // Two identical posts can race past the findOne above. The unique index is
